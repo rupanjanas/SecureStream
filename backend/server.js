@@ -117,7 +117,7 @@ app.get('/logout', (req, res) => {
     req.session.destroy(() => {
         const logoutUrl = `${process.env.COGNITO_LOGOUT_URL}?client_id=${process.env.CLIENT_ID}&logout_uri=${process.env.LOGOUT_URI}`;
         
-        console.log("FINAL LOGOUT URL:", logoutUrl); // 🔥 add this
+        console.log("FINAL LOGOUT URL:", logoutUrl); 
         
         res.redirect(logoutUrl);
     });
