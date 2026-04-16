@@ -50,15 +50,21 @@ export default function LandingPage() {
   const [user, setUser] = useState(null);
   const [dropOpen, setDropOpen] = useState(false);
   const dropRef = useRef(null);
+useEffect(() => {
+    // Show error if auth failed
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error') === 'auth_failed') {
+        console.warn('Authentication failed');
+        // optionally set an error state and show a toast
+    }
 
-  useEffect(() => {
-    fetch("/")
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.isAuthenticated) setUser(data.user);
-      })
-      .catch(() => {});
-  }, []);
+    fetch("http://localhost:3000", { credentials: "include" })
+        .then((r) => r.json())
+        .then((data) => {
+            if (data.isAuthenticated) setUser(data.user);
+        })
+        .catch(() => {});
+}, []);
 
   useEffect(() => {
     function handleClick(e) {
@@ -152,7 +158,7 @@ export default function LandingPage() {
           </p>
           <div className="flex gap-3 justify-center">
             <a
-              href="/login"
+              href="http://localhost:3000/login"
               className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
             >
               Get started free

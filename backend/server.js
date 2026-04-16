@@ -34,6 +34,7 @@ app.use(session({
     cookie: {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
         maxAge: 1000 * 60 * 60 // 1 hour
     }
 }));
@@ -64,43 +65,60 @@ app.get('/login', checkClientReady, (req, res) => {
     req.session.nonce = nonce;
     req.session.state = state;
 
-    const authUrl = client.authorizationUrl({
-        scope: 'phone openid email',
-        state: state,
-        nonce: nonce,
-    });
+    // ✅ CRITICAL: save session BEFORE redirecting, so state/nonce
+    // are persisted before Cognito sends the user back to /callback
+    req.session.save((err) => {
+        if (err) {
+            console.error('Session save error:', err);
+            return res.status(500).send('Session error');
+        }
 
-    res.redirect(authUrl);
+        const authUrl = client.authorizationUrl({
+            scope: 'phone openid email',
+            state: state,
+            nonce: nonce,
+        });
+
+        res.redirect(authUrl);
+    });
 });
 
 app.get('/callback', checkClientReady, async (req, res) => {
+    console.log('Session at callback:', req.session);
     try {
         const params = client.callbackParams(req);
+
+        // ✅ Pass stored nonce + state for validation
         const tokenSet = await client.callback(
             process.env.REDIRECT_URI,
             params,
             {
                 nonce: req.session.nonce,
-                state: req.session.state
+                state: req.session.state,
             }
         );
 
         const userInfo = await client.userinfo(tokenSet.access_token);
-        req.session.userInfo = userInfo;
 
-        res.redirect('/');
+        // ✅ Store user, clean up one-time values
+        req.session.userInfo = userInfo;
+        delete req.session.nonce;
+        delete req.session.state;
+
+        // ✅ Redirect back to React frontend landing page
+        res.redirect('http://localhost:5173');
     } catch (err) {
         console.error('Callback error:', err);
-        res.redirect('/?error=auth_failed');
+        res.redirect('http://localhost:5173?error=auth_failed');
     }
 });
 
 app.get('/logout', (req, res) => {
-    req.session.destroy((err) => {
-        if (err) {
-            console.error('Session destruction error:', err);
-        }
+    req.session.destroy(() => {
         const logoutUrl = `${process.env.COGNITO_LOGOUT_URL}?client_id=${process.env.CLIENT_ID}&logout_uri=${process.env.LOGOUT_URI}`;
+        
+        console.log("FINAL LOGOUT URL:", logoutUrl); // 🔥 add this
+        
         res.redirect(logoutUrl);
     });
 });
