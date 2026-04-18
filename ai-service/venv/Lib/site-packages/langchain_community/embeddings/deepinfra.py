@@ -2,8 +2,8 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import requests
 from langchain_core.embeddings import Embeddings
-from langchain_core.utils import get_from_dict_or_env, pre_init
-from pydantic import BaseModel, ConfigDict
+from langchain_core.pydantic_v1 import BaseModel, Extra, root_validator
+from langchain_core.utils import get_from_dict_or_env
 
 DEFAULT_MODEL_ID = "sentence-transformers/clip-ViT-B-32"
 MAX_BATCH_SIZE = 1024
@@ -54,9 +54,12 @@ class DeepInfraEmbeddings(BaseModel, Embeddings):
     batch_size: int = MAX_BATCH_SIZE
     """Batch size for embedding requests."""
 
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    class Config:
+        """Configuration for this pydantic object."""
 
-    @pre_init
+        extra = Extra.forbid
+
+    @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
         deepinfra_api_token = get_from_dict_or_env(

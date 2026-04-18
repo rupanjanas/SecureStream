@@ -1,61 +1,85 @@
-import { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import LandingPage from './components/landingPage';
+import { useEffect, useState } from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import LandingPage from "./components/landingPage";
+import Dashboard  from "./components/Dashboard";
+import UploadPage from "./components/UploadPage";
+import ChatPage   from "./components/ChatPage";
+
+function ProtectedRoute({ user, children }) {
+  useEffect(() => {
+    if (!user) {
+      window.location.href = "http://localhost:3000/login";
+    }
+  }, [user]);
+
+  if (!user) return null;
+  return children;
+}
 
 function App() {
-  const [user, setUser] = useState(null);
+  const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // 🔄 Fetch user from backend
   useEffect(() => {
-    fetch('http://localhost:3000', {
-      credentials: 'include'
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.isAuthenticated) {
-          setUser(data.user);
-        }
+    fetch("http://localhost:3000", { credentials: "include" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.isAuthenticated) setUser(data.user);
       })
-      .catch(err => console.error("Fetch error:", err))
+      .catch((err) => console.error("Fetch error:", err))
       .finally(() => setLoading(false));
   }, []);
 
-  // 🔐 Login
-  const handleLogin = () => {
-    window.location.href = 'http://localhost:3000/login';
-  };
-
-  // 🚪 Logout
-  const handleLogout = () => {
-    window.location.href = 'http://localhost:3000/logout';
-  };
-
-  // ⏳ Optional loading state
   if (loading) {
-    return <h2 style={{ textAlign: 'center' }}>Loading...</h2>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex gap-1.5">
+          {[0, 150, 300].map((d) => (
+            <span
+              key={d}
+              className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
+              style={{ animationDelay: `${d}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+    );
   }
 
   return (
     <Router>
       <Routes>
-        {/* ✅ Main landing page */}
+        <Route path="/" element={<LandingPage />} />
+
         <Route
-          path="/"
+          path="/dashboard"
           element={
-            <LandingPage
-              user={user}
-              onLogin={handleLogin}
-              onLogout={handleLogout}
-            />
+            <ProtectedRoute user={user} loading={false}>
+              <Dashboard user={user} />
+            </ProtectedRoute>
           }
         />
 
-        {/* ✅ Fix for "/login" route error */}
-        <Route path="/login" element={<Navigate to="/" />} />
+        <Route
+          path="/upload"
+          element={
+            <ProtectedRoute user={user} loading={false}>
+              <UploadPage user={user} />
+            </ProtectedRoute>
+          }
+        />
 
-        {/* ✅ Catch-all route (prevents crashes) */}
-        <Route path="*" element={<Navigate to="/" />} />
+        <Route
+          path="/chat"
+          element={
+            <ProtectedRoute user={user} loading={false}>
+              <ChatPage user={user} />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route path="/login" element={<Navigate to="/" replace />} />
+        <Route path="*"      element={<Navigate to="/" replace />} />
       </Routes>
     </Router>
   );

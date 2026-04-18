@@ -7,9 +7,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
+from langchain_core.pydantic_v1 import Extra, SecretStr, root_validator
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.utils import convert_to_secret_str, get_from_dict_or_env, pre_init
-from pydantic import ConfigDict, SecretStr
+from langchain_core.utils import convert_to_secret_str, get_from_dict_or_env
 
 
 class NeuralDBRetriever(BaseRetriever):
@@ -21,9 +21,11 @@ class NeuralDBRetriever(BaseRetriever):
     db: Any = None  #: :meta private:
     """NeuralDB instance"""
 
-    model_config = ConfigDict(
-        extra="forbid",
-    )
+    class Config:
+        """Configuration for this pydantic object."""
+
+        extra = Extra.forbid
+        underscore_attrs_are_private = True
 
     @staticmethod
     def _verify_thirdai_library(thirdai_key: Optional[str] = None) -> None:
@@ -108,7 +110,7 @@ class NeuralDBRetriever(BaseRetriever):
 
         return cls(thirdai_key=thirdai_key, db=ndb.NeuralDB.from_checkpoint(checkpoint))  # type: ignore[arg-type]
 
-    @pre_init
+    @root_validator()
     def validate_environments(cls, values: Dict) -> Dict:
         """Validate ThirdAI environment variables."""
         values["thirdai_key"] = convert_to_secret_str(

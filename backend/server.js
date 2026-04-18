@@ -28,15 +28,13 @@ async function initializeClient() {
 initializeClient().catch(console.error);
 
 app.use(session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 1000 * 60 * 60 // 1 hour
-    }
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: true,
+  cookie: {
+    secure: false,   
+    sameSite: "lax"
+  }
 }));
 
 const checkClientReady = (req, res, next) => {
@@ -51,11 +49,21 @@ const checkAuth = (req, res, next) => {
     next();
 };
 
-app.get('/', checkAuth, (req, res) => {
-    res.json({
-    isAuthenticated: req.isAuthenticated,
-    user: req.session.userInfo || null
-});
+app.get("/", (req, res) => {
+  console.log("SESSION ROOT:", req.session); // debug
+
+  if (!req.session.tokens) {
+    return res.json({
+      isAuthenticated: false
+    });
+  }
+
+  res.json({
+    isAuthenticated: true,
+    user: req.session.userInfo,
+    id_token: req.session.tokens.id_token,
+    access_token: req.session.tokens.access_token,
+  });
 });
 
 app.get('/login', checkClientReady, (req, res) => {
@@ -85,10 +93,10 @@ app.get('/login', checkClientReady, (req, res) => {
 
 app.get('/callback', checkClientReady, async (req, res) => {
     console.log('Session at callback:', req.session);
+
     try {
         const params = client.callbackParams(req);
 
-        // ✅ Pass stored nonce + state for validation
         const tokenSet = await client.callback(
             process.env.REDIRECT_URI,
             params,
@@ -100,19 +108,28 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
         const userInfo = await client.userinfo(tokenSet.access_token);
 
-        // ✅ Store user, clean up one-time values
+        req.session.tokens = tokenSet;
         req.session.userInfo = userInfo;
+
         delete req.session.nonce;
         delete req.session.state;
 
-        // ✅ Redirect back to React frontend landing page
-        res.redirect('http://localhost:5173');
+        // 🔥 THIS IS THE FIX
+        req.session.save((err) => {
+            if (err) {
+                console.error("Session save error:", err);
+                return res.redirect('http://localhost:5173?error=session');
+            }
+
+            console.log("SESSION SAVED:", req.session); // debug
+            res.redirect('http://localhost:5173');
+        });
+
     } catch (err) {
         console.error('Callback error:', err);
         res.redirect('http://localhost:5173?error=auth_failed');
     }
 });
-
 app.get('/logout', (req, res) => {
     req.session.destroy(() => {
         const logoutUrl = `${process.env.COGNITO_LOGOUT_URL}?client_id=${process.env.CLIENT_ID}&logout_uri=${process.env.LOGOUT_URI}`;

@@ -1,6 +1,7 @@
 """**Embeddings** interface."""
 
 from abc import ABC, abstractmethod
+from typing import List
 
 from langchain_core.runnables.config import run_in_executor
 
@@ -34,7 +35,7 @@ class Embeddings(ABC):
     """
 
     @abstractmethod
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed search docs.
 
         Args:
@@ -45,7 +46,7 @@ class Embeddings(ABC):
         """
 
     @abstractmethod
-    def embed_query(self, text: str) -> list[float]:
+    def embed_query(self, text: str) -> List[float]:
         """Embed query text.
 
         Args:
@@ -55,7 +56,7 @@ class Embeddings(ABC):
             Embedding.
         """
 
-    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         """Asynchronous Embed search docs.
 
         Args:
@@ -66,7 +67,7 @@ class Embeddings(ABC):
         """
         return await run_in_executor(None, self.embed_documents, texts)
 
-    async def aembed_query(self, text: str) -> list[float]:
+    async def aembed_query(self, text: str) -> List[float]:
         """Asynchronous Embed query text.
 
         Args:

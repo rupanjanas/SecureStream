@@ -3,8 +3,7 @@ from __future__ import annotations
 import sys
 from typing import List
 
-from langchain_core.tools import BaseTool
-from langchain_core.tools.base import BaseToolkit
+from langchain_core.tools import BaseTool, BaseToolkit
 
 from langchain_community.tools.azure_cognitive_services import (
     AzureCogsFormRecognizerTool,

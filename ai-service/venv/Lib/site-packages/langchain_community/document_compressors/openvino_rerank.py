@@ -5,7 +5,7 @@ import numpy as np
 from langchain_core.callbacks import Callbacks
 from langchain_core.documents import Document
 from langchain_core.documents.compressor import BaseDocumentCompressor
-from pydantic import Field
+from langchain_core.pydantic_v1 import Field
 
 
 class RerankRequest:
@@ -21,9 +21,9 @@ class OpenVINOReranker(BaseDocumentCompressor):
     OpenVINO rerank models.
     """
 
-    ov_model: Any = None
+    ov_model: Any
     """OpenVINO model object."""
-    tokenizer: Any = None
+    tokenizer: Any
     """Tokenizer for embedding model."""
     model_name_or_path: str
     """HuggingFace model id."""

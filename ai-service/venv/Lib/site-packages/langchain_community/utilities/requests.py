@@ -1,11 +1,10 @@
 """Lightweight wrapper around requests library, with async support."""
-
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Literal, Optional, Union
 
 import aiohttp
 import requests
-from pydantic import BaseModel, ConfigDict
+from langchain_core.pydantic_v1 import BaseModel, Extra
 from requests import Response
 
 
@@ -21,10 +20,11 @@ class Requests(BaseModel):
     auth: Optional[Any] = None
     verify: Optional[bool] = True
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-    )
+    class Config:
+        """Configuration for this pydantic object."""
+
+        extra = Extra.forbid
+        arbitrary_types_allowed = True
 
     def get(self, url: str, **kwargs: Any) -> requests.Response:
         """GET the URL and return the text."""
@@ -83,6 +83,7 @@ class Requests(BaseModel):
                     url,
                     headers=self.headers,
                     auth=self.auth,
+                    verify=self.verify,
                     **kwargs,
                 ) as response:
                     yield response
@@ -92,6 +93,7 @@ class Requests(BaseModel):
                 url,
                 headers=self.headers,
                 auth=self.auth,
+                verify=self.verify,
                 **kwargs,
             ) as response:
                 yield response
@@ -146,10 +148,11 @@ class GenericRequestsWrapper(BaseModel):
     response_content_type: Literal["text", "json"] = "text"
     verify: bool = True
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-    )
+    class Config:
+        """Configuration for this pydantic object."""
+
+        extra = Extra.forbid
+        arbitrary_types_allowed = True
 
     @property
     def requests(self) -> Requests:

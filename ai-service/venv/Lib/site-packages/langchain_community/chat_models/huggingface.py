@@ -25,8 +25,7 @@ from langchain_core.outputs import (
     ChatResult,
     LLMResult,
 )
-from pydantic import model_validator
-from typing_extensions import Self
+from langchain_core.pydantic_v1 import root_validator
 
 from langchain_community.llms.huggingface_endpoint import HuggingFaceEndpoint
 from langchain_community.llms.huggingface_hub import HuggingFaceHub
@@ -39,7 +38,7 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful, respectful, and honest assistant."
 
 @deprecated(
     since="0.0.37",
-    removal="1.0",
+    removal="0.3",
     alternative_import="langchain_huggingface.ChatHuggingFace",
 )
 class ChatHuggingFace(BaseChatModel):
@@ -77,17 +76,17 @@ class ChatHuggingFace(BaseChatModel):
             else self.tokenizer
         )
 
-    @model_validator(mode="after")
-    def validate_llm(self) -> Self:
+    @root_validator()
+    def validate_llm(cls, values: dict) -> dict:
         if not isinstance(
-            self.llm,
+            values["llm"],
             (HuggingFaceTextGenInference, HuggingFaceEndpoint, HuggingFaceHub),
         ):
             raise TypeError(
                 "Expected llm to be one of HuggingFaceTextGenInference, "
-                f"HuggingFaceEndpoint, HuggingFaceHub, received {type(self.llm)}"
+                f"HuggingFaceEndpoint, HuggingFaceHub, received {type(values['llm'])}"
             )
-        return self
+        return values
 
     def _stream(
         self,

@@ -41,10 +41,9 @@ class ScaNN(VectorStore):
             from langchain_community.embeddings import HuggingFaceEmbeddings
             from langchain_community.vectorstores import ScaNN
 
-            model_name = "sentence-transformers/all-mpnet-base-v2"
             db = ScaNN.from_texts(
                 ['foo', 'bar', 'barz', 'qux'],
-                HuggingFaceEmbeddings(model_name=model_name))
+                HuggingFaceEmbeddings())
             db.similarity_search('foo?', k=1)
     """
 

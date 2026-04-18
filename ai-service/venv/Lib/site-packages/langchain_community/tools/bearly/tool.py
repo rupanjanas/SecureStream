@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Dict, List, Type
 
 import requests
-from langchain_core.tools import Tool
-from pydantic import BaseModel, Field
+from langchain_core.pydantic_v1 import BaseModel, Field
+
+from langchain_community.tools import Tool
 
 
 def strip_markdown_code(md_string: str) -> str:
@@ -37,7 +38,7 @@ class BearlyInterpreterToolArguments(BaseModel):
 
     python_code: str = Field(
         ...,
-        examples=["print('Hello World')"],
+        example="print('Hello World')",
         description=(
             "The pure python script to be evaluated. "
             "The contents will be in main.py. "
@@ -73,8 +74,8 @@ class BearlyInterpreterTool:
     """Tool for evaluating python code in a sandbox environment."""
 
     api_key: str
-    endpoint: str = "https://exec.bearly.ai/v1/interpreter"
-    name: str = "bearly_interpreter"
+    endpoint = "https://exec.bearly.ai/v1/interpreter"
+    name = "bearly_interpreter"
     args_schema: Type[BaseModel] = BearlyInterpreterToolArguments
     files: Dict[str, FileInfo] = {}
 

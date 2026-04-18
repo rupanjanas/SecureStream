@@ -58,7 +58,7 @@ class UpstashRatelimitHandler(BaseCallbackHandler):
     every time you invoke.
     """
 
-    raise_error: bool = True
+    raise_error = True
     _checked: bool = False
 
     def __init__(

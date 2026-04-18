@@ -47,11 +47,6 @@ def _chat_stream_response_to_chat_generation_chunk(
     )
 
 
-@deprecated(
-    since="0.3.1",
-    removal="1.0.0",
-    alternative_import="langchain_ollama.ChatOllama",
-)
 class ChatOllama(BaseChatModel, _OllamaCommon):
     """Ollama locally runs large language models.
 
@@ -149,7 +144,7 @@ class ChatOllama(BaseChatModel, _OllamaCommon):
                         elif (
                             isinstance(temp_image_url, dict) and "url" in temp_image_url
                         ):
-                            image_url = temp_image_url["url"]
+                            image_url = temp_image_url
                         else:
                             raise ValueError(
                                 "Only string image_url or dict with string 'url' "

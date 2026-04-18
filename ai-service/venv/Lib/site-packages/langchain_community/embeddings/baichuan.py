@@ -1,21 +1,12 @@
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from langchain_core.embeddings import Embeddings
-from langchain_core.utils import (
-    secret_from_env,
-)
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    SecretStr,
-    model_validator,
-)
+from langchain_core.pydantic_v1 import BaseModel, Field, SecretStr, root_validator
+from langchain_core.utils import convert_to_secret_str, get_from_dict_or_env
 from requests import RequestException
-from typing_extensions import Self
 
-BAICHUAN_API_URL: str = "https://api.baichuan-ai.com/v1/embeddings"
+BAICHUAN_API_URL: str = "http://api.baichuan-ai.com/v1/embeddings"
 
 # BaichuanTextEmbeddings is an embedding model provided by Baichuan Inc. (https://www.baichuan-ai.com/home).
 # As of today (Jan 25th, 2024) BaichuanTextEmbeddings ranks #1 in C-MTEB
@@ -25,7 +16,7 @@ BAICHUAN_API_URL: str = "https://api.baichuan-ai.com/v1/embeddings"
 # Official Website: https://platform.baichuan-ai.com/docs/text-Embedding
 # An API-key is required to use this embedding model. You can get one by registering
 # at https://platform.baichuan-ai.com/docs/text-Embedding.
-# BaichuanTextEmbeddings support 512 token window and produces vectors with
+# BaichuanTextEmbeddings support 512 token window and preduces vectors with
 # 1024 dimensions.
 
 
@@ -34,57 +25,55 @@ BAICHUAN_API_URL: str = "https://api.baichuan-ai.com/v1/embeddings"
 class BaichuanTextEmbeddings(BaseModel, Embeddings):
     """Baichuan Text Embedding models.
 
-    Setup:
-        To use, you should set the environment variable ``BAICHUAN_API_KEY`` to
-        your API key or pass it as a named parameter to the constructor.
+    To use, you should set the environment variable ``BAICHUAN_API_KEY`` to
+    your API key or pass it as a named parameter to the constructor.
 
-        .. code-block:: bash
-
-            export BAICHUAN_API_KEY="your-api-key"
-
-    Instantiate:
+    Example:
         .. code-block:: python
 
             from langchain_community.embeddings import BaichuanTextEmbeddings
 
-            embeddings = BaichuanTextEmbeddings()
+            baichuan = BaichuanTextEmbeddings(baichuan_api_key="my-api-key")
+    """
 
-    Embed:
-        .. code-block:: python
-
-            # embed the documents
-            vectors = embeddings.embed_documents([text1, text2, ...])
-
-            # embed the query
-            vectors = embeddings.embed_query(text)
-    """  # noqa: E501
-
-    session: Any = None  #: :meta private:
+    session: Any  #: :meta private:
     model_name: str = Field(default="Baichuan-Text-Embedding", alias="model")
-    """The model used to embed the documents."""
-    baichuan_api_key: SecretStr = Field(
-        alias="api_key",
-        default_factory=secret_from_env(["BAICHUAN_API_KEY", "BAICHUAN_AUTH_TOKEN"]),
-    )
+    baichuan_api_key: Optional[SecretStr] = Field(default=None, alias="api_key")
     """Automatically inferred from env var `BAICHUAN_API_KEY` if not provided."""
     chunk_size: int = 16
     """Chunk size when multiple texts are input"""
 
-    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
+    class Config:
+        """Configuration for this pydantic object."""
 
-    @model_validator(mode="after")
-    def validate_environment(self) -> Self:
+        allow_population_by_field_name = True
+
+    @root_validator(allow_reuse=True)
+    def validate_environment(cls, values: Dict) -> Dict:
         """Validate that auth token exists in environment."""
+        try:
+            baichuan_api_key = convert_to_secret_str(
+                get_from_dict_or_env(values, "baichuan_api_key", "BAICHUAN_API_KEY")
+            )
+        except ValueError as original_exc:
+            try:
+                baichuan_api_key = convert_to_secret_str(
+                    get_from_dict_or_env(
+                        values, "baichuan_auth_token", "BAICHUAN_AUTH_TOKEN"
+                    )
+                )
+            except ValueError:
+                raise original_exc
         session = requests.Session()
         session.headers.update(
             {
-                "Authorization": f"Bearer {self.baichuan_api_key.get_secret_value()}",
+                "Authorization": f"Bearer {baichuan_api_key.get_secret_value()}",
                 "Accept-Encoding": "identity",
                 "Content-type": "application/json",
             }
         )
-        self.session = session
-        return self
+        values["session"] = session
+        return values
 
     def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
         """Internal method to call Baichuan Embedding API and return embeddings.

@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, cast
+from typing import Dict, List, Optional, cast
 
 import requests
-from langchain_core._api.deprecation import deprecated
 from langchain_core.embeddings import Embeddings
+from langchain_core.pydantic_v1 import BaseModel, Extra, SecretStr, root_validator
 from langchain_core.utils import convert_to_secret_str, get_from_dict_or_env
-from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
 
-@deprecated(
-    since="0.3.4",
-    removal="1.0.0",
-    alternative_import="langchain_community.ClovaXEmbeddings",
-)
 class ClovaEmbeddings(BaseModel, Embeddings):
     """
     Clova's embedding service.
@@ -59,13 +53,11 @@ class ClovaEmbeddings(BaseModel, Embeddings):
     app_id: Optional[SecretStr] = None
     """Application ID for identifying your application."""
 
-    model_config = ConfigDict(
-        extra="forbid",
-    )
+    class Config:
+        extra = Extra.forbid
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
+    @root_validator(pre=True, allow_reuse=True)
+    def validate_environment(cls, values: Dict) -> Dict:
         """Validate api key exists in environment."""
         values["clova_emb_api_key"] = convert_to_secret_str(
             get_from_dict_or_env(values, "clova_emb_api_key", "CLOVA_EMB_API_KEY")

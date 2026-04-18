@@ -3,9 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core._api import deprecated
 from langchain_core.embeddings import Embeddings
+from langchain_core.pydantic_v1 import BaseModel, Extra, root_validator
 from langchain_core.utils import get_from_dict_or_env
-from pydantic import BaseModel, ConfigDict, model_validator
-from typing_extensions import Self
 
 DEFAULT_MODEL = "sentence-transformers/all-mpnet-base-v2"
 VALID_TASKS = ("feature-extraction",)
@@ -13,7 +12,7 @@ VALID_TASKS = ("feature-extraction",)
 
 @deprecated(
     since="0.2.2",
-    removal="1.0",
+    removal="0.3.0",
     alternative_import="langchain_huggingface.HuggingFaceEndpointEmbeddings",
 )
 class HuggingFaceHubEmbeddings(BaseModel, Embeddings):
@@ -35,8 +34,8 @@ class HuggingFaceHubEmbeddings(BaseModel, Embeddings):
             )
     """
 
-    client: Any = None  #: :meta private:
-    async_client: Any = None  #: :meta private:
+    client: Any  #: :meta private:
+    async_client: Any  #: :meta private:
     model: Optional[str] = None
     """Model name to use."""
     repo_id: Optional[str] = None
@@ -48,11 +47,13 @@ class HuggingFaceHubEmbeddings(BaseModel, Embeddings):
 
     huggingfacehub_api_token: Optional[str] = None
 
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    class Config:
+        """Configuration for this pydantic object."""
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
+        extra = Extra.forbid
+
+    @root_validator(pre=True)
+    def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
         huggingfacehub_api_token = get_from_dict_or_env(
             values, "huggingfacehub_api_token", "HUGGINGFACEHUB_API_TOKEN"
@@ -89,15 +90,15 @@ class HuggingFaceHubEmbeddings(BaseModel, Embeddings):
             )
         return values
 
-    @model_validator(mode="after")
-    def post_init(self) -> Self:
+    @root_validator(pre=False, skip_on_failure=True)
+    def post_init(cls, values: Dict) -> Dict:
         """Post init validation for the class."""
-        if self.task not in VALID_TASKS:
+        if values["task"] not in VALID_TASKS:
             raise ValueError(
-                f"Got invalid task {self.task}, "
+                f"Got invalid task {values['task']}, "
                 f"currently only {VALID_TASKS} are supported"
             )
-        return self
+        return values
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Call out to HuggingFaceHub's embedding endpoint for embedding search docs.
@@ -111,9 +112,8 @@ class HuggingFaceHubEmbeddings(BaseModel, Embeddings):
         # replace newlines, which can negatively affect performance.
         texts = [text.replace("\n", " ") for text in texts]
         _model_kwargs = self.model_kwargs or {}
-        #  api doc: https://huggingface.github.io/text-embeddings-inference/#/Text%20Embeddings%20Inference/embed
         responses = self.client.post(
-            json={"inputs": texts, **_model_kwargs}, task=self.task
+            json={"inputs": texts, "parameters": _model_kwargs}, task=self.task
         )
         return json.loads(responses.decode())
 

@@ -1,9 +1,8 @@
 """Util that calls Twilio."""
-
 from typing import Any, Dict, Optional
 
+from langchain_core.pydantic_v1 import BaseModel, Extra, root_validator
 from langchain_core.utils import get_from_dict_or_env
-from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class TwilioAPIWrapper(BaseModel):
@@ -26,7 +25,7 @@ class TwilioAPIWrapper(BaseModel):
             twilio.run('test', '+12484345508')
     """
 
-    client: Any = None  #: :meta private:
+    client: Any  #: :meta private:
     account_sid: Optional[str] = None
     """Twilio account string identifier."""
     auth_token: Optional[str] = None
@@ -43,14 +42,14 @@ class TwilioAPIWrapper(BaseModel):
         must be empty.
     """
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=False,
-        extra="forbid",
-    )
+    class Config:
+        """Configuration for this pydantic object."""
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_environment(cls, values: Dict) -> Any:
+        extra = Extra.forbid
+        arbitrary_types_allowed = False
+
+    @root_validator()
+    def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
         try:
             from twilio.rest import Client

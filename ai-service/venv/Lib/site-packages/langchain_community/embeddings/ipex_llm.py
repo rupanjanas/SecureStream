@@ -4,7 +4,7 @@
 from typing import Any, Dict, List, Optional
 
 from langchain_core.embeddings import Embeddings
-from pydantic import BaseModel, ConfigDict, Field
+from langchain_core.pydantic_v1 import BaseModel, Extra, Field
 
 DEFAULT_BGE_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_QUERY_BGE_INSTRUCTION_EN = (
@@ -49,7 +49,7 @@ class IpexLLMBgeEmbeddings(BaseModel, Embeddings):
             )
     """
 
-    client: Any = None  #: :meta private:
+    client: Any  #: :meta private:
     model_name: str = DEFAULT_BGE_MODEL
     """Model name to use."""
     cache_folder: Optional[str] = None
@@ -106,7 +106,10 @@ class IpexLLMBgeEmbeddings(BaseModel, Embeddings):
         if "-zh" in self.model_name:
             self.query_instruction = DEFAULT_QUERY_BGE_INSTRUCTION_ZH
 
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    class Config:
+        """Configuration for this pydantic object."""
+
+        extra = Extra.forbid
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Compute doc embeddings using a HuggingFace transformer model.

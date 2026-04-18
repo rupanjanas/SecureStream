@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
 const features = [
   {
@@ -50,21 +51,21 @@ export default function LandingPage() {
   const [user, setUser] = useState(null);
   const [dropOpen, setDropOpen] = useState(false);
   const dropRef = useRef(null);
-useEffect(() => {
-    // Show error if auth failed
+  const navigate = useNavigate();
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('error') === 'auth_failed') {
-        console.warn('Authentication failed');
-        // optionally set an error state and show a toast
+    if (params.get("error") === "auth_failed") {
+      console.warn("Authentication failed");
     }
 
     fetch("http://localhost:3000", { credentials: "include" })
-        .then((r) => r.json())
-        .then((data) => {
-            if (data.isAuthenticated) setUser(data.user);
-        })
-        .catch(() => {});
-}, []);
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.isAuthenticated) setUser(data.user);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     function handleClick(e) {
@@ -114,18 +115,32 @@ useEffect(() => {
                       {user.email}
                     </span>
                   </div>
-                  <a
-                    href="/profile"
-                    className="block px-4 py-2.5 text-sm hover:bg-gray-50"
+                  <button
+                    onClick={() => { setDropOpen(false); navigate("/dashboard"); }}
+                    className="block w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50"
                   >
-                    Profile
-                  </a>
-                  <a
-                    href="http://localhost:3000/logout"
-                    className="block px-4 py-2.5 text-sm text-red-600 hover:bg-gray-50"
+                    Dashboard
+                  </button>
+                  <button
+                    onClick={() => { setDropOpen(false); navigate("/upload"); }}
+                    className="block w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50"
                   >
-                    Sign out
-                  </a>
+                    Upload document
+                  </button>
+                  <button
+                    onClick={() => { setDropOpen(false); navigate("/chat"); }}
+                    className="block w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50"
+                  >
+                    Ask AI
+                  </button>
+                  <div className="border-t border-gray-100">
+                    <a
+                      href="http://localhost:3000/logout"
+                      className="block px-4 py-2.5 text-sm text-red-600 hover:bg-gray-50"
+                    >
+                      Sign out
+                    </a>
+                  </div>
                 </div>
               )}
             </div>
@@ -157,14 +172,23 @@ useEffect(() => {
             OIDC authentication backed by AWS Cognito. Sign in and start building.
           </p>
           <div className="flex gap-3 justify-center">
+            {user ? (
+              <button
+                onClick={() => navigate("/dashboard")}
+                className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
+              >
+                Go to dashboard →
+              </button>
+            ) : (
+              <a
+                href="http://localhost:3000/login"
+                className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
+              >
+                Get started free
+              </a>
+            )}
             <a
               href="http://localhost:3000/login"
-              className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
-            >
-              Get started free
-            </a>
-            <a
-              href="/docs"
               className="px-6 py-2.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
             >
               View docs
