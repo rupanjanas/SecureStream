@@ -38,9 +38,22 @@ export async function askQuestion(question, topK = 10) {
 
   if (!session || !session.access_token) {
     throw new Error("User not authenticated. Please login again.");
-  }
+  } 
 
   const token = session.access_token;
+
+   if (!token) {
+    throw new Error("No token found.");
+  }
+
+  // ✅ THEN use token
+  const payload = JSON.parse(atob(token.split(".")[1]));
+  const isExpired = payload.exp * 1000 < Date.now();
+
+  if (isExpired) {
+    window.location.href = "http://localhost:3000/login";
+    return;
+  }
 
   const res = await fetch(`${AI_URL}/query`, {
     method: "POST",
