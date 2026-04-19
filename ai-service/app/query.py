@@ -26,7 +26,7 @@ Question: {question}
 Answer:"""
 )
 
-async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
+async def answer_question(question: str, org_id: str, top_k: int = 10) -> dict:
     # Embed the question
     query_vector = embedder.embed_query(question)
 
@@ -43,7 +43,9 @@ async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
             "sources": [],
             "org_id": org_id
         }
-
+        
+    print("CHUNKS RETURNED:", len(chunks))
+    print("QUERY ORG_ID:", org_id)
     # Build context
     context = "\n\n---\n\n".join(
         f"[From: {c['doc_name']}]\n{c['chunk_text']}"

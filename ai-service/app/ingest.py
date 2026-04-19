@@ -48,7 +48,7 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict
             }
             for i in range(len(texts))
         ]
-
+        print("INGEST ORG_ID:", org_id)
         await db_insert("documents", rows)
 
         return {

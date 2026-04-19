@@ -31,19 +31,46 @@ export default function UploadPage({ user }) {
     handleFile(e.dataTransfer.files[0]);
   };
 
-  const handleUpload = async () => {
-    if (!file) return;
-    setStatus("uploading");
-    setError(null);
-    try {
-      const data = await uploadDocument(file, token);
-      setResult(data);
-      setStatus("done");
-    } catch (err) {
-      setError(err.message || "Upload failed. Is the AI service running on port 8000?");
-      setStatus("error");
+ const handleUpload = async () => {
+  if (!file) return;
+  setStatus("uploading");
+  setError(null);
+  try {
+    const isPDF = file.type === "application/pdf";
+
+    // Read text for TXT, create object URL for PDF
+    let docText = "";
+    let docUrl  = null;
+
+    if (isPDF) {
+    docUrl = null;   
+    } else {
+      docText = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = (e) => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
     }
-  };
+
+    const data = await uploadDocument(file, token);
+    setResult(data);
+    setStatus("done");
+
+    setTimeout(() => {
+      navigate("/doc-viewer", {
+      state: {
+      docName: file.name,
+      docText,
+      file   // 🔥 PASS FILE DIRECTLY
+    }
+  });
+    }, 1200);
+  } catch (err) {
+    setError(err.message || "Upload failed. Is the AI service running on port 8000?");
+    setStatus("error");
+  }
+};
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">

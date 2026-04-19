@@ -172,21 +172,17 @@ export default function LandingPage() {
             OIDC authentication backed by AWS Cognito. Sign in and start building.
           </p>
           <div className="flex gap-3 justify-center">
-            {user ? (
-              <button
-                onClick={() => navigate("/dashboard")}
-                className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
-              >
+              {user ? (
+                <button onClick={() => navigate("/dashboard")}
+                className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors">
                 Go to dashboard →
+                </button>
+              ) : (
+              <button onClick={() => navigate("/onboarding")}
+              className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors">
+              Get started free
               </button>
-            ) : (
-              <a
-                href="http://localhost:3000/login"
-                className="px-6 py-2.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
-              >
-                Get started free
-              </a>
-            )}
+              )}
             <a
               href="http://localhost:3000/login"
               className="px-6 py-2.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"

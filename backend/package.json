@@ -9,11 +9,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@supabase/supabase-js": "^2.103.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "ejs": "^3.1.10",
     "express": "^4.21.1",
     "express-session": "^1.18.1",
-    "openid-client": "^5.7.0"
+    "nodemailer": "^8.0.5",
+    "openid-client": "^5.7.0",
+    "uuid": "^13.0.0"
   }
 }

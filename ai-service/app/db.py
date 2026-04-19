@@ -42,3 +42,17 @@ async def db_test() -> bool:
             timeout=10
         )
         return r.status_code == 200
+    
+async def db_patch(table: str, filters: dict, data: dict) -> list:
+    params = {k: f"eq.{v}" for k, v in filters.items()}
+    async with httpx.AsyncClient() as client:
+        r = await client.patch(
+            f"{BASE}/rest/v1/{table}",
+            headers={**HEADERS, "Prefer": "return=representation"},
+            params=params,
+            json=data,
+            timeout=30
+        )
+        if r.status_code not in (200, 201):
+            raise Exception(f"Supabase patch error {r.status_code}: {r.text}")
+        return r.json()

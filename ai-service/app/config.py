@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     embed_model: str = "nomic-embed-text"
     llm_model: str = "llama3"
     cognito_jwks_url: str
+    aws_region: str
+    cognito_user_pool_id: str
+    cognito_client_id: str
+
 
     class Config:
         env_file = ".env"

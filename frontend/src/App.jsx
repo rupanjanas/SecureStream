@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
-import LandingPage from "./components/landingPage";
-import Dashboard  from "./components/Dashboard";
-import UploadPage from "./components/UploadPage";
-import ChatPage   from "./components/ChatPage";
+import LandingPage    from "./components/landingPage";
+import OnboardingPage from "./components/Onboarding";
+import OrgSetupPage   from "./components/OrgSetUp";
+import Dashboard      from "./components/Dashboard";
+import UploadPage     from "./components/UploadPage";
+import ChatPage       from "./components/ChatPage";
+import DocViewerPage  from "./components/DocViewer";
 
 function ProtectedRoute({ user, children }) {
   useEffect(() => {
-    if (!user) {
-      window.location.href = "http://localhost:3000/login";
-    }
+    if (!user) window.location.href = "http://localhost:3000/login";
   }, [user]);
-
   if (!user) return null;
   return children;
 }
@@ -23,9 +23,7 @@ function App() {
   useEffect(() => {
     fetch("http://localhost:3000", { credentials: "include" })
       .then((res) => res.json())
-      .then((data) => {
-        if (data.isAuthenticated) setUser(data.user);
-      })
+      .then((data) => { if (data.isAuthenticated) setUser(data.user); })
       .catch((err) => console.error("Fetch error:", err))
       .finally(() => setLoading(false));
   }, []);
@@ -35,11 +33,8 @@ function App() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="flex gap-1.5">
           {[0, 150, 300].map((d) => (
-            <span
-              key={d}
-              className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
-              style={{ animationDelay: `${d}ms` }}
-            />
+            <span key={d} className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
+              style={{ animationDelay: `${d}ms` }}/>
           ))}
         </div>
       </div>
@@ -49,34 +44,22 @@ function App() {
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<LandingPage />} />
+        <Route path="/"            element={<LandingPage />} />
+        <Route path="/onboarding"  element={<OnboardingPage />} />
+        <Route path="/org-setup"   element={<OrgSetupPage />} />
 
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute user={user} loading={false}>
-              <Dashboard user={user} />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/upload"
-          element={
-            <ProtectedRoute user={user} loading={false}>
-              <UploadPage user={user} />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/chat"
-          element={
-            <ProtectedRoute user={user} loading={false}>
-              <ChatPage user={user} />
-            </ProtectedRoute>
-          }
-        />
+        <Route path="/dashboard" element={
+          <ProtectedRoute user={user}><Dashboard user={user} /></ProtectedRoute>
+        }/>
+        <Route path="/upload" element={
+          <ProtectedRoute user={user}><UploadPage user={user} /></ProtectedRoute>
+        }/>
+        <Route path="/chat" element={
+          <ProtectedRoute user={user}><ChatPage user={user} /></ProtectedRoute>
+        }/>
+        <Route path="/doc-viewer" element={
+          <ProtectedRoute user={user}><DocViewerPage user={user} /></ProtectedRoute>
+        }/>
 
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="*"      element={<Navigate to="/" replace />} />

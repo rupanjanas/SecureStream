@@ -33,11 +33,14 @@ export async function uploadDocument(file) {
 
 export async function askQuestion(question, topK = 10) {
   const session = await getSession();
-  const token = session?.access_token;
 
-  if (!token) {
-    throw new Error("No token found.");
+  console.log("SESSION:", session);
+
+  if (!session || !session.access_token) {
+    throw new Error("User not authenticated. Please login again.");
   }
+
+  const token = session.access_token;
 
   const res = await fetch(`${AI_URL}/query`, {
     method: "POST",
@@ -45,13 +48,20 @@ export async function askQuestion(question, topK = 10) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ question, top_k: topK }),
+    body: JSON.stringify({
+      question: question,
+      top_k: Number(topK),
+    }),
   });
 
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const error = await res.text();
+    console.error("QUERY ERROR:", error);
+    throw new Error(error);
+  }
+
   return res.json();
 }
-
 
 
 export async function getHealth() {
