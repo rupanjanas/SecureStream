@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from typing import Optional
 from fastapi import Query
 from urllib.parse import quote
-
+from fastapi.responses import StreamingResponse
+import httpx, json
 app = FastAPI(title="SecureStream AI Service", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -108,7 +109,93 @@ async def ingest(
         raise HTTPException(status_code=400, detail="No org_id in token")
     file_bytes = await file.read()
     return await ingest_document(file_bytes, file.filename, org_id)
+@app.post("/query/stream")
+async def query_stream(
+    body: QueryRequest,
+    claims: dict = Depends(verify_token)
+):
+    org_id = claims.get("custom:org_id") or claims.get("sub")
+    if not org_id:
+        raise HTTPException(status_code=400, detail="No org_id in token")
 
+    from app.query import get_embedder, get_llm, RAG_PROMPT
+    from app.db import db_rpc
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+
+    # Embed + fetch chunks
+    query_vector = await loop.run_in_executor(
+        None, get_embedder().embed_query, body.question
+    )
+    chunks = await db_rpc("match_documents", {
+        "query_embedding": query_vector,
+        "match_count":     min(body.top_k, 4),
+        "filter_org_id":   org_id
+    })
+
+    if not chunks:
+        async def empty():
+            yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
+        return StreamingResponse(empty(), media_type="text/event-stream")
+
+    top_chunks = chunks[:3]
+    context = "\n\n---\n\n".join(
+        f"[Doc: {c['doc_name']} | chunk {i+1}]\n{c['chunk_text']}"
+        for i, c in enumerate(top_chunks)
+    )
+    prompt = RAG_PROMPT.format(context=context, question=body.question)
+
+    source_passages = [
+        {
+            "doc_name": c["doc_name"],
+            "passage":  c["chunk_text"],
+            "similarity": round(c.get("similarity", 0), 3)
+        }
+        for c in top_chunks
+    ]
+
+    async def stream_tokens():
+        # Stream directly from Ollama's API
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream(
+                "POST",
+                f"{settings.ollama_base_url}/api/generate",
+                json={
+                    "model":       settings.llm_model,
+                    "prompt":      prompt,
+                    "stream":      True,
+                    "options": {
+                        "temperature":  0.1,
+                        "num_predict":  512,
+                        "num_ctx":      2048
+                    }
+                }
+            ) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        done  = data.get("done", False)
+                        if token:
+                            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                        if done:
+                            yield f"data: {json.dumps({'done': True, 'sources': [c['chunk_text'][:200]+'...' for c in top_chunks], 'source_passages': source_passages})}\n\n"
+                            break
+                    except Exception:
+                        continue
+
+    return StreamingResponse(
+        stream_tokens(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"
+        }
+    )                                                                                 
 @app.post("/query", response_model=QueryResponse)
 async def query(
     body: QueryRequest,
