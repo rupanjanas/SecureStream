@@ -99,3 +99,5 @@ async def answer_question(question: str, org_id: str, top_k: int = 4) -> dict:
         "source_passages": source_passages,
         "org_id":          org_id
     }
+    await set_cached(org_id, question, result, ttl=300)
+    return result
