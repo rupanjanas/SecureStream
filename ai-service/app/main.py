@@ -11,6 +11,7 @@ from fastapi import Query
 from urllib.parse import quote
 from fastapi.responses import StreamingResponse
 import httpx, json
+from app.config import settings
 app = FastAPI(title="SecureStream AI Service", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
