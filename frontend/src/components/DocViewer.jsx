@@ -2,11 +2,11 @@ import { useState, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
-import { askQuestion } from "../api/aiService";
 import { getAnnotations, createAnnotation, toggleShareAnnotation } from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";  // 🔥 IMPORTANT (.mjs)
+import { askQuestionStream } from "../api/aiService"
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
@@ -54,6 +54,7 @@ export default function DocViewerPage({ user }) {
   const [sharingId, setSharingId]             = useState(null);
   const bottomRef                             = useRef(null);
   const userEmail                             = user?.email || "unknown";
+  const [sourcePassages, setSourcePassages]   = useState([]);
 
   useEffect(() => {
     if (docName) {
@@ -112,37 +113,80 @@ export default function DocViewerPage({ user }) {
     }
   };
 
-  const send = async () => {
-    const question = input.trim();
-    if (!question || loading) return;
-    setMessages((m) => [...m, { role: "user", content: question }]);
-    setInput("");
-    setLoading(true);
-    setHighlights([]);
-    try {
-      const data = await askQuestion(question);
-      setMessages((m) => [...m, {
-        role: "assistant",
-        content: data.answer,
-        sources: data.sources || []
-      }]);
-      const phrases = (data.sources || [])
-        .flatMap((s) =>
-          s.replace(/\.\.\.$/,"").split(/[.\n]/)
-            .map((p) => p.trim())
-            .filter((p) => p.length > 10)
-        )
-        .slice(0, 8);
-      setHighlights(phrases);
-    } catch (err) {
-      setMessages((m) => [...m, {
-        role: "assistant",
-        content: `Error: ${err.message}`
-      }]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // ---------------- SEND ----------------
+const send = async () => {
+  const question = input.trim();
+  if (!question || loading) return;
+
+  setMessages((m) => [...m, { role: "user", content: question }]);
+  setInput("");
+  setLoading(true);
+  setHighlights([]);
+  setSourcePassages([]);
+
+  // ✅ FIX: prevent duplicate assistant bubble
+  setMessages((m) => {
+    if (m.length && m[m.length - 1].streaming) return m;
+    return [...m, { role: "assistant", content: "", streaming: true }];
+  });
+
+  try {
+    await askQuestionStream(
+      question,
+
+      // STREAM TOKEN
+      (token) => {
+        setMessages((m) => {
+          const updated = [...m];
+          const last = updated[updated.length - 1];
+
+          updated[updated.length - 1] = {
+            ...last,
+            content: last.content + token
+          };
+
+          return updated;
+        });
+      },
+
+      // DONE
+      (sources, passages) => {
+        setMessages((m) => {
+          const updated = [...m];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            streaming: false,
+            sources
+          };
+          return updated;
+        });
+
+        // ✅ FIX: safe + exact match + dedupe
+        const phrases = [...new Set(
+          (passages || [])
+            .sort((a, b) => b.similarity - a.similarity)
+            .map((p) => p.passage.slice(0, 120))
+        )];
+
+        setHighlights(phrases);
+        setSourcePassages(passages || []);
+        setLoading(false);
+      }
+    );
+  } catch (err) {
+    setMessages((m) => {
+      const updated = [...m];
+      updated[updated.length - 1] = {
+        ...updated[updated.length - 1],
+        content: `Error: ${err.message}`,
+        streaming: false
+      };
+      return updated;
+    });
+    setLoading(false);
+  }
+};
+
   const safeAnnotations = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
   const sharedAnnotations = safeAnnotations.filter((a) => a.is_shared && a.user_email !== userEmail);
@@ -173,11 +217,17 @@ export default function DocViewerPage({ user }) {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {highlights.length > 0 && (
+              {highlights.length > 0 && !isPDF && (
                 <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-lg">
                   {highlights.length} highlights
                 </span>
+                
               )}
+              {isPDF && highlights.length > 0 && (
+  <div className="text-xs text-yellow-600 px-4 py-2">
+    Highlighting not supported in PDF view
+  </div>
+)}
               <span className="text-xs text-gray-400">
                 {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
               </span>
@@ -361,7 +411,47 @@ export default function DocViewerPage({ user }) {
                   Starts as private · share anytime
                 </span>
               </div>
-
+              {/* Source passages panel — shows after AI responds */}
+{sourcePassages.length > 0 && (
+  <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-gray-50">
+    <p className="text-xs font-medium text-gray-500 mb-2">
+      Sources used ({sourcePassages.length})
+    </p>
+    <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
+      {sourcePassages.map((p, i) => (
+        <div key={i}
+          className="bg-white border border-yellow-200 rounded-lg px-3 py-2 cursor-pointer hover:border-yellow-400 transition-colors"
+         onClick={() => {
+  if (isPDF && p.page !== undefined) {
+    const page = p.page + 1;
+    const el = document.querySelector(`[data-page-number="${page}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  } else {
+    const marks = document.querySelectorAll("mark");
+    if (marks[i]) {
+      marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+}}
+        >
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-600 truncate">
+              {p.doc_name}
+            </span>
+            <span className="text-xs text-yellow-600 ml-2 flex-shrink-0">
+              {Math.round(p.similarity * 100)}% match
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
+            {p.passage.slice(0, 120)}...
+          </p>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
               <div className="flex gap-2">
                 <input
                   type="text"

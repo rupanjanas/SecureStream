@@ -282,11 +282,11 @@ app.post('/org/invite/email', checkAuth, async (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
-    req.session.destroy(() => {
+    req.session.destroy((err) => {
+        res.clearCookie('connect.sid');   // 🔥 IMPORTANT
+
         const logoutUrl = `${process.env.COGNITO_LOGOUT_URL}?client_id=${process.env.CLIENT_ID}&logout_uri=${process.env.LOGOUT_URI}`;
-        
-        console.log("FINAL LOGOUT URL:", logoutUrl); 
-        
+
         res.redirect(logoutUrl);
     });
 });

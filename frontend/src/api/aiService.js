@@ -3,18 +3,19 @@ const AI_URL   = "http://localhost:8000";
 
 export async function getSession() {
   const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });
+  if (!res.ok) {
+    return null;   // ✅ important
+  }
   return res.json();
 }
 
 export async function uploadDocument(file) {
   const session = await getSession();
-  const token = session?.access_token;  
+const token = session?.access_token;
 
-  console.log("TOKEN:", token); // debug
-
-  if (!token) {
-    throw new Error("No token found. User not authenticated.");
-  }
+if (!token) {
+  throw new Error("User not authenticated.");
+}
 
   const form = new FormData();
   form.append("file", file);
@@ -31,7 +32,62 @@ export async function uploadDocument(file) {
   return res.json();
 }
 
-export async function askQuestion(question, topK = 10) {
+// Streaming version — calls onToken for each word, onDone when finished
+export async function askQuestionStream(question, onToken, onDone, topK = 3) {
+  const session = await getSession();
+  const token = session?.access_token;
+
+  if (!token) {
+    throw new Error("User not authenticated.");
+  }
+
+  const payload = JSON.parse(atob(token.split(".")[1]));
+  const isExpired = payload.exp * 1000 < Date.now();
+
+  if (isExpired) {
+    window.location.href = "http://localhost:3000/login";
+    return;
+  }
+
+  const res = await fetch(`${AI_URL}/query/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,   // ✅ FIXED
+    },
+    body: JSON.stringify({ question, top_k: topK })
+  });
+
+  if (!res.ok) throw new Error(await res.text());
+
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+
+      try {
+        const data = JSON.parse(line.slice(6));
+
+        if (data.token) onToken(data.token);
+        if (data.done) onDone(data.sources || [], data.source_passages || []);
+      } catch {
+        continue;
+      }
+    }
+  }
+}
+
+export async function askQuestion(question, topK = 3) {
   const session = await getSession();
 
   console.log("SESSION:", session);
@@ -51,7 +107,7 @@ export async function askQuestion(question, topK = 10) {
   const isExpired = payload.exp * 1000 < Date.now();
 
   if (isExpired) {
-    window.location.href = "http://localhost:3000/login";
+    console.log("Token expired. Please login again.");
     return;
   }
 

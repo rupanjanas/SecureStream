@@ -50,7 +50,7 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict
         ]
         print("INGEST ORG_ID:", org_id)
         await db_insert("documents", rows)
-
+        print("LAST CHUNK SAMPLE:", texts[-1])
         return {
             "message": "Ingested successfully",
             "chunks_stored": len(rows),

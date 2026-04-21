@@ -8,7 +8,7 @@ class IngestResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 10          # how many chunks to retrieve
+    top_k: int =3          # how many chunks to retrieve
 
 class QueryResponse(BaseModel):
     answer: str
