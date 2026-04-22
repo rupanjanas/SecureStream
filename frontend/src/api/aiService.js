@@ -87,6 +87,34 @@ export async function askQuestionStream(question, onToken, onDone, topK = 3) {
   }
 }
 
+export async function listDocuments(token) {
+  const res = await fetch(`${AI_URL}/documents`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error("LIST DOCS ERROR:", err);
+    throw new Error(err);
+  }
+
+  return res.json();
+}
+
+export async function getDocumentText(docName, token) {
+  const res = await fetch(`${AI_URL}/documents/${encodeURIComponent(docName)}/text`, {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function askQuestion(question, topK = 3) {
   const session = await getSession();
 

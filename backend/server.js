@@ -4,9 +4,8 @@ const session = require('express-session');
 const { Issuer, generators } = require('openid-client');
 require('dotenv').config();
 const { v4: uuidv4 } = require('uuid');
-
-
 const app = express();
+app.use(express.json());
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
@@ -65,23 +64,65 @@ const checkAuth = (req, res, next) => {
     next();
 };
 
-app.get("/", (req, res) => {
-  console.log("SESSION ROOT:", req.session); // debug
+app.get('/', (req, res) => {
+  console.log("SESSION ROOT:", req.session);
 
-  if (!req.session.tokens) {
-    return res.json({
-      isAuthenticated: false
-    });
+  if (!req.session.tokens && !req.session.userInfo) {
+    return res.json({ isAuthenticated: false });
   }
 
   res.json({
     isAuthenticated: true,
-    user: req.session.userInfo,
-    id_token: req.session.tokens.id_token,
-    access_token: req.session.tokens.access_token,
+    user:         req.session.userInfo        || null,
+    id_token:     req.session.tokens?.id_token     || null,
+    access_token: req.session.tokens?.access_token || null,
+    orgId:        req.session.orgId           || null,
+    orgName:      req.session.orgName         || null,
+    mode:         req.session.mode            || null,
+    memberships:  req.session.memberships     || []
+  });
+});
+app.get('/org/memberships', checkAuth, (req, res) => {
+  res.json({
+    memberships: req.session.memberships || [],
+    currentOrgId:   req.session.orgId   || null,
+    currentOrgName: req.session.orgName || null
   });
 });
 
+// Select which org/mode to use
+app.post('/org/select', checkAuth, async (req, res) => {
+  const { orgId, mode } = req.body;
+  // mode: "personal" | "org"
+
+  if (mode === 'personal') {
+    req.session.orgId   = null;
+    req.session.orgName = null;
+    req.session.mode    = 'personal';
+    return req.session.save(() => res.json({ mode: 'personal' }));
+  }
+
+  if (mode === 'org' && orgId) {
+    // Verify user is actually a member
+    const { data } = await supabaseAdmin
+      .from('org_members')
+      .select('org_id, orgs(name)')
+      .eq('user_sub', req.session.userInfo.sub)
+      .eq('org_id', orgId)
+      .single();
+
+    if (!data) return res.status(403).json({ error: 'Not a member of this org' });
+
+    req.session.orgId   = data.org_id;
+    req.session.orgName = data.orgs?.name;
+    req.session.mode    = 'org';
+    return req.session.save(() =>
+      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs?.name })
+    );
+  }
+
+  res.status(400).json({ error: 'Invalid selection' });
+});
 app.post('/org/create', checkAuth, async (req, res) => {
   const { name } = req.body;
   const user = req.session.userInfo;
@@ -198,44 +239,75 @@ app.get('/login', checkClientReady, (req, res) => {
     });
 });
 
+// Select which org/mode to use
+app.post('/org/select', checkAuth, async (req, res) => {
+  const { orgId, mode } = req.body;
+  // mode: "personal" | "org"
+
+  if (mode === 'personal') {
+    req.session.orgId   = null;
+    req.session.orgName = null;
+    req.session.mode    = 'personal';
+    return req.session.save(() => res.json({ mode: 'personal' }));
+  }
+
+  if (mode === 'org' && orgId) {
+    // Verify user is actually a member
+    const { data } = await supabaseAdmin
+      .from('org_members')
+      .select('org_id, orgs(name)')
+      .eq('user_sub', req.session.userInfo.sub)
+      .eq('org_id', orgId)
+      .single();
+
+    if (!data) return res.status(403).json({ error: 'Not a member of this org' });
+
+    req.session.orgId   = data.org_id;
+    req.session.orgName = data.orgs?.name;
+    req.session.mode    = 'org';
+    return req.session.save(() =>
+      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs?.name })
+    );
+  }
+
+  res.status(400).json({ error: 'Invalid selection' });
+});
+// Replace your /callback route with this:
 app.get('/callback', checkClientReady, async (req, res) => {
-    console.log('Session at callback:', req.session);
+  try {
+    const params   = client.callbackParams(req);
+    const tokenSet = await client.callback(
+      process.env.REDIRECT_URI,
+      params,
+      { nonce: req.session.nonce, state: req.session.state }
+    );
 
-    try {
-        const params = client.callbackParams(req);
+    const userInfo = await client.userinfo(tokenSet.access_token);
+    req.session.userInfo = userInfo;
+    delete req.session.nonce;
+    delete req.session.state;
 
-        const tokenSet = await client.callback(
-            process.env.REDIRECT_URI,
-            params,
-            {
-                nonce: req.session.nonce,
-                state: req.session.state,
-            }
-        );
+    // Look up all orgs this user belongs to
+    const { data: memberships } = await supabaseAdmin
+      .from('org_members')
+      .select('org_id, role, orgs(id, name)')
+      .eq('user_sub', userInfo.sub);
 
-        const userInfo = await client.userinfo(tokenSet.access_token);
+    req.session.memberships = memberships || [];
 
-        req.session.tokens = tokenSet;
-        req.session.userInfo = userInfo;
-
-        delete req.session.nonce;
-        delete req.session.state;
-
-        // 🔥 THIS IS THE FIX
-        req.session.save((err) => {
-            if (err) {
-                console.error("Session save error:", err);
-                return res.redirect('http://localhost:5173?error=session');
-            }
-
-            console.log("SESSION SAVED:", req.session); // debug
-            res.redirect('http://localhost:5173');
-        });
-
-    } catch (err) {
-        console.error('Callback error:', err);
-        res.redirect('http://localhost:5173?error=auth_failed');
+    // If only one org, auto-restore it
+    if (memberships?.length === 1) {
+      req.session.orgId   = memberships[0].org_id;
+      req.session.orgName = memberships[0].orgs?.name;
     }
+
+    req.session.save(() => {
+      res.redirect('http://localhost:5173/workspace-select');
+    });
+  } catch (err) {
+    console.error('Callback error:', err);
+    res.redirect('http://localhost:5173?error=auth_failed');
+  }
 });
 
 app.post('/org/invite/email', checkAuth, async (req, res) => {

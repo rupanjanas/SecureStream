@@ -7,6 +7,7 @@ import Dashboard      from "./components/Dashboard";
 import UploadPage     from "./components/UploadPage";
 import ChatPage       from "./components/ChatPage";
 import DocViewerPage  from "./components/DocViewer";
+import WorkspaceSelectPage from "./components/WorkSpaceSelect";
 
 function ProtectedRoute({ user, children }) {
   useEffect(() => {
@@ -16,14 +17,24 @@ function ProtectedRoute({ user, children }) {
   return children;
 }
 
-function App() {
+export default function App() {
   const [user, setUser]       = useState(null);
+  const [orgId, setOrgId]     = useState(null);
+  const [orgName, setOrgName] = useState(null);
+  const [mode, setMode]       = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("http://localhost:3000", { credentials: "include" })
-      .then((res) => res.json())
-      .then((data) => { if (data.isAuthenticated) setUser(data.user); })
+    fetch("http://localhost:3000/", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.isAuthenticated) {
+          setUser(data.user);
+          setOrgId(data.orgId   || null);
+          setOrgName(data.orgName || null);
+          setMode(data.mode     || null);
+        }
+      })
       .catch((err) => console.error("Fetch error:", err))
       .finally(() => setLoading(false));
   }, []);
@@ -32,7 +43,7 @@ function App() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="flex gap-1.5">
-          {[0, 150, 300].map((d) => (
+          {[0,150,300].map((d) => (
             <span key={d} className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
               style={{ animationDelay: `${d}ms` }}/>
           ))}
@@ -44,28 +55,37 @@ function App() {
   return (
     <Router>
       <Routes>
-        <Route path="/"            element={<LandingPage />} />
-        <Route path="/onboarding"  element={<OnboardingPage />} />
-        <Route path="/org-setup"   element={<OrgSetupPage />} />
-
+        <Route path="/"                 element={<LandingPage />} />
+        <Route path="/onboarding"       element={<OnboardingPage />} />
+        <Route path="/org-setup"        element={<OrgSetupPage />} />
+        <Route path="/workspace-select" element={
+          <ProtectedRoute user={user}>
+            <WorkspaceSelectPage />
+          </ProtectedRoute>
+        }/>
         <Route path="/dashboard" element={
-          <ProtectedRoute user={user}><Dashboard user={user} /></ProtectedRoute>
+          <ProtectedRoute user={user}>
+            <Dashboard user={user} orgId={orgId} orgName={orgName} mode={mode} />
+          </ProtectedRoute>
         }/>
         <Route path="/upload" element={
-          <ProtectedRoute user={user}><UploadPage user={user} /></ProtectedRoute>
+          <ProtectedRoute user={user}>
+            <UploadPage user={user} />
+          </ProtectedRoute>
         }/>
         <Route path="/chat" element={
-          <ProtectedRoute user={user}><ChatPage user={user} /></ProtectedRoute>
+          <ProtectedRoute user={user}>
+            <ChatPage user={user} />
+          </ProtectedRoute>
         }/>
         <Route path="/doc-viewer" element={
-          <ProtectedRoute user={user}><DocViewerPage user={user} /></ProtectedRoute>
+          <ProtectedRoute user={user}>
+            <DocViewerPage user={user} />
+          </ProtectedRoute>
         }/>
-
-        <Route path="/login" element={<Navigate to="/" replace />} />
-        <Route path="*"      element={<Navigate to="/" replace />} />
+        <Route path="/login" element={<Navigate to="/"  replace />} />
+        <Route path="*"      element={<Navigate to="/"  replace />} />
       </Routes>
     </Router>
   );
 }
-
-export default App;

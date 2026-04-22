@@ -4,6 +4,8 @@ from langchain_ollama import OllamaEmbeddings
 from app.config import settings
 from app.db import db_insert
 import tempfile, os, re
+import httpx
+import uuid
 
 # Lazy — don't init at import time
 _embedder = None
@@ -44,20 +46,44 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict
 
         print(f"Embedding {len(texts)} chunks for org={org_id}...")
         vectors = get_embedder().embed_documents(texts)
-
+        print("Uploading to Supabase...")
+        file_url = await upload_to_storage(file_bytes, filename)
+        print("Upload success:", file_url)
         rows = [
             {
                 "org_id":     org_id,
                 "doc_name":   filename,
                 "chunk_text": texts[i],
                 "embedding":  vectors[i],
+                "file_url": file_url,
                 "metadata":   {"chunk_index": i, "total_chunks": len(texts)}
             }
             for i in range(len(texts))
         ]
-
+        
         await db_insert("documents", rows)
         print(f"Ingested {len(rows)} chunks for org={org_id}")
         return {"message": "Ingested successfully", "chunks_stored": len(rows), "doc_name": filename}
     finally:
         os.unlink(tmp_path)
+        
+async def upload_to_storage(file_bytes: bytes, filename: str):
+    filename = f"{uuid.uuid4()}_{filename}"
+    url = f"{settings.supabase_url}/storage/v1/object/documents/{filename}"
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            url,
+            headers={
+                "apikey": settings.supabase_service_key,
+                "Authorization": f"Bearer {settings.supabase_service_key}",
+                "Content-Type": "application/pdf"
+            },
+            content=file_bytes
+        )
+
+        if r.status_code not in (200, 201):
+            raise Exception(f"Storage upload failed: {r.text}")
+
+    # public URL
+    return f"{settings.supabase_url}/storage/v1/object/public/documents/{filename}"

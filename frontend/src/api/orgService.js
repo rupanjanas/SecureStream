@@ -102,3 +102,28 @@ export async function toggleShareAnnotation(id, isShared) {
 
   return res.json();
 }
+
+export async function getMemberships() {
+  const res = await fetch(`${AUTH_URL}/org/memberships`, {
+    credentials: "include"
+  });
+  return res.json();
+}
+
+export async function selectWorkspace(mode, orgId = null) {
+  const res = await fetch(`${AUTH_URL}/org/select`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode, orgId })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listDocuments(token) {
+  const res = await fetch(`${AI_URL}/documents`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  return res.json();
+}

@@ -7,6 +7,7 @@ import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";  // 🔥 IMPORTANT (.mjs)
 import { askQuestionStream } from "../api/aiService"
+import { getDocumentText } from "../api/aiService";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
@@ -36,8 +37,9 @@ export default function DocViewerPage({ user }) {
   const navigate  = useNavigate();
   const docName   = location.state?.docName  || "Document";
   const docText   = location.state?.docText  || "";
-  const file = location.state?.file || null;
-  const isPDF     = docName.toLowerCase().endsWith(".pdf");
+  const file = location.state?.fileUrl;
+  console.log("FILE URL:", file);
+  const isPDF = file?.includes(".pdf");
 
   const [numPages, setNumPages]               = useState(null);
   const [messages, setMessages]               = useState([]);
@@ -55,6 +57,37 @@ export default function DocViewerPage({ user }) {
   const bottomRef                             = useRef(null);
   const userEmail                             = user?.email || "unknown";
   const [sourcePassages, setSourcePassages]   = useState([]);
+  const fromDashboard = location.state?.fromDashboard || false;
+  const [, setFetchedText] = useState("");
+
+  useEffect(() => {
+  if (!fromDashboard || !docName) return;
+
+  // Fetch all chunks for this doc and reconstruct text
+  const token = localStorage.getItem("token");
+  fetch(`http://localhost:8000/documents/${encodeURIComponent(docName)}/text`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+    .then((r) => r.json())
+    .then((data) => setFetchedText(data.text || ""))
+    .catch(() => {});
+}, [fromDashboard, docName]);
+
+useEffect(() => {
+  const loadDoc = async () => {
+    try {
+      const token = localStorage.getItem("token");
+
+      const res = await getDocumentText(docName, token);
+
+      setFetchedText(res.text || "");
+    } catch (err) {
+      console.error("Failed to load document:", err);
+    }
+  };
+
+  if (docName) loadDoc();
+}, [docName]);
 
   useEffect(() => {
     if (docName) {
@@ -304,9 +337,12 @@ const send = async () => {
             {isPDF ? (
               <div className="flex justify-center py-4 px-4">
                 <Document
-                  file={file}
-                  onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-                  className="max-w-full"
+                  file={{
+                    url: file,
+                    withCredentials: false
+                  }}
+                 onLoadSuccess={({ numPages: n }) => setNumPages(n)}
+                 onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}   // ✅ ADD THIS
                 >
                   {Array.from({ length: numPages || 1 }, (_, i) => (
                     <Page
@@ -475,8 +511,8 @@ const send = async () => {
         </div>
 
         {/* RIGHT — AI Chat */}
-        <div className="w-96 flex flex-col bg-white flex-shrink-0">
-          <div className="px-4 py-3 border-b border-gray-100 flex-shrink-0">
+        <div className="w-96 flex flex-col bg-white shrink-0">
+          <div className="px-4 py-3 border-b border-gray-100 shrink-0">
             <p className="text-sm font-semibold text-gray-900">Ask AI</p>
             <p className="text-xs text-gray-400">
               {isPDF ? "Queries your embedded PDF" : "Highlights relevant passages"}

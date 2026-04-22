@@ -238,3 +238,78 @@ async def query(
         raise HTTPException(status_code=400, detail="No org_id in token")
 
     return await answer_question(body.question, org_id, body.top_k)
+
+@app.get("/documents")
+async def list_documents(claims: dict = Depends(verify_token)):
+    org_id = claims.get("custom:org_id") or claims.get("sub")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id": f"eq.{org_id}",
+                "select": "doc_name,created_at,metadata,file_url",
+                "order": "created_at.desc"
+            }
+        )
+
+        data = r.json()
+
+        # -------- DEDUP --------
+        seen = set()
+        docs = []
+
+        for d in data:
+            name = d.get("doc_name")
+
+            if name not in seen:
+                seen.add(name)
+
+                metadata = d.get("metadata") or {}
+
+                docs.append({
+                    "doc_name": name,
+                    "created_at": d.get("created_at"),
+                    "chunks": metadata.get("total_chunks", 0),
+                    "file_url": d.get("file_url") 
+                })
+
+        return {"documents": docs, "org_id": org_id}
+
+
+# ---------------- GET FULL TEXT ----------------
+@app.get("/documents/{doc_name}/text")
+async def get_document_text(
+    doc_name: str,
+    claims: dict = Depends(verify_token)
+):
+    org_id = claims.get("custom:org_id") or claims.get("sub")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id": f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "select": "chunk_text,metadata"
+            }
+        )
+
+        chunks = r.json()
+
+        # -------- SAFE SORT (IMPORTANT) --------
+        chunks_sorted = sorted(
+            chunks,
+            key=lambda x: (x.get("metadata") or {}).get("chunk_index", 0)
+        )
+
+        # -------- REBUILD TEXT --------
+        full_text = " ".join(c.get("chunk_text", "") for c in chunks_sorted)
+
+        return {
+            "doc_name": doc_name,
+            "text": full_text,
+            "chunk_count": len(chunks_sorted)
+        }
