@@ -42,7 +42,27 @@ async def db_test() -> bool:
             timeout=10
         )
         return r.status_code == 200
-    
+
+async def db_keyword_search(org_id: str, keyword: str) -> list:
+    """Search chunks by keyword — keyword comes from the user's question."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id":     f"eq.{org_id}",
+                "chunk_text": f"ilike.*{keyword}*",
+                "limit":      "10"
+            },
+            timeout=30
+        )
+        if r.status_code != 200:
+            print(f"Keyword search error {r.status_code}: {r.text}")
+            return []
+        data = r.json()
+        print(f"KEYWORD SEARCH '{keyword}' found: {len(data)} chunks")
+        return data
+
 async def db_patch(table: str, filters: dict, data: dict) -> list:
     params = {k: f"eq.{v}" for k, v in filters.items()}
     async with httpx.AsyncClient() as client:

@@ -4,9 +4,9 @@ from fastapi.responses import StreamingResponse
 
 from app.auth import verify_token
 from app.ingest import ingest_document
-from app.query import answer_question, get_embedder, RAG_PROMPT
+from app.query import answer_question, get_embedder, RAG_PROMPT,extract_keywords
 from app.models import IngestResponse, QueryRequest, QueryResponse
-from app.db import db_test, db_insert, db_rpc, HEADERS, BASE
+from app.db import db_test, db_insert, db_rpc,db_keyword_search, HEADERS, BASE
 from app.config import settings
 
 from pydantic import BaseModel
@@ -143,23 +143,29 @@ async def query_stream(
 
     chunks = await db_rpc("match_documents", {
         "query_embedding": query_vector,
-        "match_count": min(body.top_k, 3),
-        "filter_org_id": org_id
+        "match_count":     6,
+        "filter_org_id":   org_id
     })
 
-    if not chunks:
-        async def empty():
-            yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
+    # Keyword search with actual question keywords
+    keywords = extract_keywords(body.question)
+    keyword_chunks = []
+    for kw in keywords:
+        kw_results = await db_keyword_search(org_id, kw)
+        keyword_chunks.extend(kw_results)
 
-        return StreamingResponse(empty(), media_type="text/event-stream")
+    # Merge deduplicated — keyword first
+    seen, all_chunks = set(), []
+    for c in keyword_chunks + chunks:
+        if c["chunk_text"] not in seen:
+            seen.add(c["chunk_text"])
+            all_chunks.append(c)
 
-    # -------- OPTIMIZED CONTEXT --------
-    top_chunks = chunks[:2]
+    top_chunks = all_chunks[:3]
 
-    context = "\n".join(
-        c["chunk_text"][:120]   # 🔥 HARD LIMIT
-        for c in top_chunks
+    context = "\n\n---\n\n".join(
+    f"[Doc: {c['doc_name']}]\n{c['chunk_text']}"
+    for c in top_chunks
     )
 
     prompt = RAG_PROMPT.format(context=context, question=body.question)
