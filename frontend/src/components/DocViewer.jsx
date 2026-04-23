@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
@@ -40,7 +40,7 @@ export default function DocViewerPage({ user }) {
   const file = location.state?.fileUrl;
   console.log("FILE URL:", file);
   const isPDF = file?.includes(".pdf");
-
+  
   const [numPages, setNumPages]               = useState(null);
   const [messages, setMessages]               = useState([]);
   const [input, setInput]                     = useState("");
@@ -59,6 +59,10 @@ export default function DocViewerPage({ user }) {
   const [sourcePassages, setSourcePassages]   = useState([]);
   const fromDashboard = location.state?.fromDashboard || false;
   const [, setFetchedText] = useState("");
+  const pdfFile = useMemo(() => ({
+  url: file,
+  withCredentials: false
+}), [file]);
 
   useEffect(() => {
   if (!fromDashboard || !docName) return;
@@ -337,10 +341,7 @@ const send = async () => {
             {isPDF ? (
               <div className="flex justify-center py-4 px-4">
                 <Document
-                  file={{
-                    url: file,
-                    withCredentials: false
-                  }}
+                  file={pdfFile}
                  onLoadSuccess={({ numPages: n }) => setNumPages(n)}
                  onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}   // ✅ ADD THIS
                 >
