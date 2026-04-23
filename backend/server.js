@@ -284,6 +284,11 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     const userInfo = await client.userinfo(tokenSet.access_token);
     req.session.userInfo = userInfo;
+    req.session.tokens = {
+  access_token: tokenSet.access_token,
+  id_token: tokenSet.id_token,
+  refresh_token: tokenSet.refresh_token
+};
     delete req.session.nonce;
     delete req.session.state;
 

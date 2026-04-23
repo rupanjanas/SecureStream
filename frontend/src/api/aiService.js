@@ -3,16 +3,27 @@ const AI_URL   = "http://localhost:8000";
 
 export async function getSession() {
   const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });
-  if (!res.ok) {
-    return null;   // ✅ important
+
+  if (!res.ok) return null;
+
+  const data = await res.json();
+
+  // ✅ ADD THIS CHECK
+  if (!data.isAuthenticated || !data.access_token) {
+    return null;
   }
-  return res.json();
+
+  return data;
 }
 
 export async function uploadDocument(file) {
-  const session = await getSession();
-const token = session?.access_token;
+ const session = await getSession();
 
+if (!session || !session.isAuthenticated || !session.access_token) {
+  throw new Error("User not authenticated.");
+}
+
+const token = session.access_token;
 if (!token) {
   throw new Error("User not authenticated.");
 }
@@ -35,11 +46,12 @@ if (!token) {
 // Streaming version — calls onToken for each word, onDone when finished
 export async function askQuestionStream(question, onToken, onDone, topK = 3) {
   const session = await getSession();
-  const token = session?.access_token;
+  console.log("SESSION:", session);
+if (!session || !session.access_token) {
+  throw new Error("User not authenticated.");
+}
 
-  if (!token) {
-    throw new Error("User not authenticated.");
-  }
+const token = session.access_token;
 
   const payload = JSON.parse(atob(token.split(".")[1]));
   const isExpired = payload.exp * 1000 < Date.now();
@@ -117,14 +129,12 @@ export async function getDocumentText(docName, token) {
 
 export async function askQuestion(question, topK = 3) {
   const session = await getSession();
-
+  const token = session.access_token;
   console.log("SESSION:", session);
 
   if (!session || !session.access_token) {
     throw new Error("User not authenticated. Please login again.");
-  } 
-
-  const token = session.access_token;
+  }  
 
    if (!token) {
     throw new Error("No token found.");
