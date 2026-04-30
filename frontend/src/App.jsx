@@ -80,8 +80,8 @@ export default function App() {
         }/>
         <Route path="/doc-viewer" element={
           <ProtectedRoute user={user}>
-            <DocViewerPage user={user} />
-          </ProtectedRoute>
+          <DocViewerPage user={user} mode={mode} orgName={orgName} />
+        </ProtectedRoute>
         }/>
         <Route path="/login" element={<Navigate to="/"  replace />} />
         <Route path="*"      element={<Navigate to="/"  replace />} />

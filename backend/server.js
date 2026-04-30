@@ -9,10 +9,24 @@ app.use(express.json());
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,           // true for 465, false for 587
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
+  },
+  tls: {
+    rejectUnauthorized: false
+  }
+});
+
+// Verify connection on startup
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('EMAIL TRANSPORTER ERROR:', error.message);
+  } else {
+    console.log('Email server ready');
   }
 });
 
@@ -123,41 +137,54 @@ app.post('/org/select', checkAuth, async (req, res) => {
 
   res.status(400).json({ error: 'Invalid selection' });
 });
-app.post('/org/create', checkAuth, async (req, res) => {
+app.post('/org/create', async (req, res) => {
+  // Check auth manually instead of using middleware
+  if (!req.session?.userInfo) {
+    return res.status(401).json({ error: "not_authenticated" });
+  }
+
   const { name } = req.body;
   const user = req.session.userInfo;
   if (!name) return res.status(400).json({ error: 'Org name required' });
 
-  const { data: org, error } = await supabaseAdmin
-    .from('orgs')
-    .insert({ name, created_by: user.sub })
-    .select()
-    .single();
+  try {
+    const { data: org, error } = await supabaseAdmin
+      .from('orgs')
+      .insert({ name, created_by: user.sub })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+    if (error) return res.status(500).json({ error: error.message });
 
-  // Add creator as admin member
-  await supabaseAdmin.from('org_members').insert({
-    org_id: org.id,
-    user_sub: user.sub,
-    email: user.email,
-    role: 'admin'
-  });
+    await supabaseAdmin.from('org_members').insert({
+      org_id: org.id,
+      user_sub: user.sub,
+      email: user.email,
+      role: 'admin'
+    });
 
-  // Generate invite token
-  const token = uuidv4();
-  await supabaseAdmin.from('invite_tokens').insert({
-    org_id: org.id,
-    token,
-    created_by: user.sub
-  });
+    const token = require('crypto').randomUUID();
+    await supabaseAdmin.from('invite_tokens').insert({
+      org_id: org.id,
+      token,
+      created_by: user.sub
+    });
 
-  // Store org in session
-  req.session.orgId = org.id;
-  req.session.orgName = org.name;
-  req.session.save();
+    req.session.orgId   = org.id;
+    req.session.orgName = org.name;
+    req.session.mode    = 'org';
 
-  res.json({ org, inviteToken: token });
+    // Add to memberships list
+    req.session.memberships = [
+      ...(req.session.memberships || []),
+      { org_id: org.id, role: 'admin', orgs: { id: org.id, name: org.name } }
+    ];
+
+    req.session.save();
+    res.json({ org, inviteToken: token });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Join org via invite token
@@ -317,44 +344,49 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
 app.post('/org/invite/email', checkAuth, async (req, res) => {
   const { email, inviteUrl } = req.body;
-  const orgName = req.session.orgName || 'SecureStream';
+  const orgName    = req.session.orgName    || 'SecureStream';
   const senderName = req.session.userInfo?.given_name || 'A teammate';
+
+  console.log("Sending invite to:", email);
 
   if (!email || !inviteUrl) {
     return res.status(400).json({ error: 'Email and inviteUrl required' });
   }
 
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.error('EMAIL_USER or EMAIL_PASS not set in .env');
+    return res.status(500).json({ error: 'Email not configured on server' });
+  }
+
   try {
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: `"SecureStream" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: `${senderName} invited you to join ${orgName} on SecureStream`,
       html: `
         <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:24px">
-            <div style="width:28px;height:28px;background:#185FA5;border-radius:8px;display:flex;align-items:center;justify-content:center">
-              <span style="color:white;font-size:14px">S</span>
-            </div>
-            <span style="font-weight:600;font-size:16px">SecureStream</span>
-          </div>
-          <h1 style="font-size:22px;font-weight:700;margin:0 0 8px">You're invited</h1>
+          <h2 style="font-size:20px;font-weight:700;margin:0 0 8px">You're invited</h2>
           <p style="color:#6b7280;font-size:14px;margin:0 0 24px">
-            ${senderName} has invited you to join <strong>${orgName}</strong> on SecureStream — a secure document intelligence platform.
+            ${senderName} has invited you to join <strong>${orgName}</strong> on SecureStream.
           </p>
           <a href="${inviteUrl}"
             style="display:inline-block;background:#185FA5;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-size:14px;font-weight:500">
             Accept invitation
           </a>
           <p style="color:#9ca3af;font-size:12px;margin-top:24px">
-            This link expires in 7 days. If you weren't expecting this, you can ignore it.
+            Link expires in 7 days.
           </p>
         </div>
       `
     });
-    res.json({ success: true });
+
+    console.log('Email sent:', info.messageId);
+    res.json({ success: true, messageId: info.messageId });
+
   } catch (err) {
-    console.error('Email error:', err);
-    res.status(500).json({ error: 'Failed to send email' });
+    console.error('EMAIL SEND ERROR:', err.message);
+    console.error('FULL ERROR:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
