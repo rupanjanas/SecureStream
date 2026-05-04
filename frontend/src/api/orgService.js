@@ -26,6 +26,31 @@ export async function getMyOrg() {
   return res.json();
 }
 
+export async function getOrgMembers() {
+  const res = await fetch(`${AUTH_URL}/org/members`, {
+    credentials: "include"
+  });
+  if (!res.ok) return { members: [] };
+  return res.json();
+}
+
+export async function getOnlineMembers() {
+  const res = await fetch(`${AUTH_URL}/org/online`, {
+    credentials: "include"
+  });
+  if (!res.ok) return { online: [] };
+  return res.json();
+}
+
+export async function pingPresence() {
+  try {
+    await fetch(`${AUTH_URL}/org/presence`, {
+      method: "POST",
+      credentials: "include"
+    });
+  } catch { /* silent — presence ping should never crash the app */ }
+}
+
 export async function generateInvite() {
   const res = await fetch(`${AUTH_URL}/org/invite`, {
     method: "POST",

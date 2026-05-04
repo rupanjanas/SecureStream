@@ -400,5 +400,67 @@ app.get('/logout', (req, res) => {
     });
 });
 
+// ── GET /org/members ──
+app.get('/org/members', checkAuth, async (req, res) => {
+  const orgId = req.session.orgId;
+  if (!orgId) return res.json({ members: [] });
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('org_members')
+      .select('user_sub, email, role, joined_at')
+      .eq('org_id', orgId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ members: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /org/online ──
+app.get('/org/online', checkAuth, async (req, res) => {
+  const orgId = req.session.orgId;
+  if (!orgId) return res.json({ online: [] });
+
+  try {
+    const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .from('user_presence')
+      .select('user_sub, email, last_seen')
+      .eq('org_id', orgId)
+      .gte('last_seen', twoMinsAgo);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ online: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /org/presence ──
+app.post('/org/presence', checkAuth, async (req, res) => {
+  const user  = req.session.userInfo;
+  const orgId = req.session.orgId;
+
+  if (!user || !orgId) return res.json({ ok: false });
+
+  try {
+    await supabaseAdmin
+      .from('user_presence')
+      .upsert({
+        user_sub:  user.sub,
+        org_id:    orgId,
+        email:     user.email,
+        last_seen: new Date().toISOString()
+      }, { onConflict: 'user_sub' });
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

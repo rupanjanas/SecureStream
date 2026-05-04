@@ -40,11 +40,8 @@ export default function UploadPage({ user }) {
 
     // Read text for TXT, create object URL for PDF
     let docText = "";
-    let docUrl  = null;
 
-    if (isPDF) {
-    docUrl = null;   
-    } else {
+    if (!isPDF) {
       docText = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload  = (e) => resolve(e.target.result);
