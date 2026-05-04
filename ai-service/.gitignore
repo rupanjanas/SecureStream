@@ -1,0 +1,31 @@
+# Node modules
+node_modules/
+
+# Environment variables
+/backend/.env
+/ai-service/.env
+.env
+**/.env
+**/.env.*
+
+# Logs
+logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build folders
+dist/
+build/
+
+# Vite cache
+.vite/
+
+# IDE files
+.vscode/
+.idea/
+
+# Optional
+coverage/
