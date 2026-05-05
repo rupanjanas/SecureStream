@@ -1,3 +1,5 @@
+from urllib import response
+
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -209,11 +211,13 @@ async def query_stream(
                                 yield f"data: {json.dumps({'token': data['response']})}\n\n"
 
                             if data.get("done"):
-                                yield f"data: {json.dumps({
-                                    'done': True,
-                                    'sources': [c['chunk_text'][:200] + '...' for c in top_chunks],
-                                    'source_passages': source_passages
-                                })}\n\n"
+                                response = {
+                                    "done": True,
+                                    "sources": [c["chunk_text"][:200] + "..." for c in top_chunks],
+                                    "source_passages": source_passages
+                                }
+
+                                yield "data: " + json.dumps(response) + "\n\n"
                                 break
 
                         except Exception:
