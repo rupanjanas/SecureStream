@@ -37,7 +37,7 @@ const supabaseAdmin = createClient(
 );
 
 app.use(cors({
-    origin: 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL,
     credentials: true
 }));
 
@@ -198,9 +198,9 @@ app.get('/org/join/:token', checkAuth, async (req, res) => {
     .eq('token', token)
     .single();
 
-  if (error || !invite) return res.redirect('http://localhost:5173?error=invalid_invite');
+  if (error || !invite) return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_invite`);
   if (invite.expires_at && new Date(invite.expires_at) < new Date())
-    return res.redirect('http://localhost:5173?error=expired_invite');
+    return res.redirect(`${process.env.FRONTEND_URL}?error=expired_invite`);
 
   // Add member if not already in org
   await supabaseAdmin.from('org_members').upsert({
@@ -214,7 +214,7 @@ app.get('/org/join/:token', checkAuth, async (req, res) => {
   req.session.orgId = invite.org_id;
   req.session.orgName = invite.orgs.name;
   req.session.save(() => {
-    res.redirect('http://localhost:5173/dashboard');
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
   });
 });
 
@@ -237,8 +237,7 @@ app.post('/org/invite', checkAuth, async (req, res) => {
     token,
     created_by: req.session.userInfo.sub
   });
-
-  res.json({ token, inviteUrl: `http://localhost:3000/org/join/${token}` });
+  res.json({ inviteUrl: `${process.env.FRONTEND_URL}/org/join/${token}` });
 });
 
 app.get('/login', checkClientReady, (req, res) => {
@@ -334,11 +333,11 @@ app.get('/callback', checkClientReady, async (req, res) => {
     }
 
     req.session.save(() => {
-      res.redirect('http://localhost:5173/workspace-select');
+      res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
     });
   } catch (err) {
     console.error('Callback error:', err);
-    res.redirect('http://localhost:5173?error=auth_failed');
+    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed`);
   }
 });
 
