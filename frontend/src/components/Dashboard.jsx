@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { getHealth, listDocuments } from "../api/aiService";
-
-const TOKEN = "dev-token";
+import { getHealth, listDocuments, getSession } from "../api/aiService";
 
 export default function Dashboard({ user, orgId, orgName, mode }) {
   const navigate          = useNavigate();
@@ -16,11 +14,27 @@ export default function Dashboard({ user, orgId, orgName, mode }) {
   }, []);
 
   useEffect(() => {
-    listDocuments(TOKEN)
-      .then((data) => setDocs(data.documents || []))
-      .catch(() => setDocs([]))
-      .finally(() => setDocsLoading(false));
-  }, [orgId]);
+  async function loadDocs() {
+    try {
+      const session = await getSession();
+
+      if (!session?.access_token) {
+        setDocs([]);
+        return;
+      }
+
+      const data = await listDocuments(session.access_token);
+
+      setDocs(data.documents || []);
+    } catch {
+      setDocs([]);
+    } finally {
+      setDocsLoading(false);
+    }
+  }
+
+  loadDocs();
+}, [orgId]);
 
   const aiOnline = health?.status === "ok";
   const dbOnline = health?.db === "connected";
