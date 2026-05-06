@@ -5,6 +5,7 @@ const { Issuer, generators } = require('openid-client');
 require('dotenv').config();
 const { v4: uuidv4 } = require('uuid');
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json());
 const nodemailer = require('nodemailer');
 
@@ -61,9 +62,9 @@ app.use(session({
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: false,   
-    sameSite: "lax"
-  }
+  secure: true,
+  sameSite: "none"
+}
 }));
 
 const checkClientReady = (req, res, next) => {
