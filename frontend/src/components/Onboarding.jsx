@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 export default function OnboardingPage() {
   const navigate = useNavigate();
 
@@ -28,7 +29,7 @@ export default function OnboardingPage() {
           {/* Personal */}
           <button
             onClick={() => {
-              window.location.href = "http://localhost:3000/login";
+              window.location.href = `${AUTH_URL}/login`;
             }}
             className="bg-white border border-gray-200 rounded-2xl p-8 text-left hover:border-[#185FA5] hover:shadow-sm transition-all group"
           >

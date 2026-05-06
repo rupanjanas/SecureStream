@@ -8,10 +8,11 @@ import UploadPage     from "./components/UploadPage";
 import ChatPage       from "./components/ChatPage";
 import DocViewerPage  from "./components/DocViewer";
 import WorkspaceSelectPage from "./components/WorkSpaceSelect";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 function ProtectedRoute({ user, children }) {
   useEffect(() => {
-    if (!user) window.location.href = "http://localhost:3000/login";
+    if (!user) window.location.href = `${AUTH_URL}/login`;
   }, [user]);
   if (!user) return null;
   return children;
@@ -25,7 +26,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("http://localhost:3000/", { credentials: "include" })
+    fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
         if (data.isAuthenticated) {

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 export default function Navbar({ user }) {
   const [dropOpen, setDropOpen] = useState(false);
   const dropRef  = useRef(null);
@@ -101,7 +102,7 @@ export default function Navbar({ user }) {
                 </button>
                 <div className="border-t border-gray-100">
                   <a
-                    href="http://localhost:3000/logout"
+                    href={`${AUTH_URL}/logout`}
                     className="block px-4 py-2.5 text-sm text-red-600 hover:bg-gray-50"
                   >
                     Sign out
@@ -112,11 +113,11 @@ export default function Navbar({ user }) {
           </div>
         ) : (
           <>
-            <a href="http://localhost:3000/login"
+            <a href={`${AUTH_URL}/login`}
               className="px-4 py-1.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors">
               Log in
             </a>
-            <a href="http://localhost:3000/login"
+            <a href={`${AUTH_URL}/login`}
               className="px-4 py-1.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors">
               Get started
             </a>

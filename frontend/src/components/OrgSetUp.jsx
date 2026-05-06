@@ -1,7 +1,8 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { createOrg, generateInvite, sendEmailInvite } from "../api/orgService";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 export default function OrgSetupPage() {
   const [step, setStep]               = useState("name");
   const [inviteUrl, setInviteUrl]     = useState("");
@@ -35,7 +36,7 @@ export default function OrgSetupPage() {
 
       if (data?.error === "not_authenticated") {
         sessionStorage.setItem("pendingOrgName", name);
-        window.location.href = "http://localhost:3000/login";
+        window.location.href = `${AUTH_URL}/login`;
         return;
       }
 
@@ -48,7 +49,7 @@ export default function OrgSetupPage() {
     } catch (err) {
       if (err.message?.includes("401")) {
         sessionStorage.setItem("pendingOrgName", name);
-        window.location.href = "http://localhost:3000/login";
+        window.location.href = `${AUTH_URL}/login`;
         return;
       }
       setError(err.message || "Failed to create organisation.");

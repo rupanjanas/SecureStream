@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { getMemberships, selectWorkspace } from "../api/orgService";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 export default function WorkspaceSelectPage() {
   const [memberships, setMemberships] = useState([]);
   const [loading, setLoading]         = useState(true);
@@ -35,7 +36,7 @@ export default function WorkspaceSelectPage() {
     const token = inviteInput.includes("/org/join/")
       ? inviteInput.split("/org/join/")[1]
       : inviteInput.trim();
-    window.location.href = `http://localhost:3000/org/join/${token}`;
+    window.location.href = `${AUTH_URL}/org/join/${token}`;
   };
 
   if (loading) {
@@ -189,7 +190,7 @@ export default function WorkspaceSelectPage() {
                   value={inviteInput}
                   onChange={(e) => setInviteInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleJoinInvite()}
-                  placeholder="http://localhost:3000/org/join/... or token"
+                  placeholder={`${AUTH_URL}/org/join/... or token`}
                   className="flex-1 border border-blue-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-[#185FA5] bg-white"
                 />
                 <button

@@ -1,5 +1,5 @@
-const AUTH_URL = "http://localhost:3000";
-const AI_URL   = "http://localhost:8000";
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 
 async function getToken() {
   const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });

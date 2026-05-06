@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 const features = [
   {
     title: "OIDC / OAuth 2.0",
@@ -59,7 +60,7 @@ export default function LandingPage() {
       console.warn("Authentication failed");
     }
 
-    fetch("http://localhost:3000", { credentials: "include" })
+    fetch(`${AUTH_URL}`, { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
         if (data.isAuthenticated) setUser(data.user);
@@ -135,7 +136,7 @@ export default function LandingPage() {
                   </button>
                   <div className="border-t border-gray-100">
                     <a
-                      href="http://localhost:3000/logout"
+                      href={`${AUTH_URL}/logout`}
                       className="block px-4 py-2.5 text-sm text-red-600 hover:bg-gray-50"
                     >
                       Sign out
@@ -147,13 +148,13 @@ export default function LandingPage() {
           ) : (
             <>
               <a
-                href="http://localhost:3000/login"
+                href={`${AUTH_URL}/login`}
                 className="px-4 py-1.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
               >
                 Log in
               </a>
               <a
-                href="http://localhost:3000/login"
+                href={`${AUTH_URL}/login`}
                 className="px-4 py-1.5 text-sm rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
               >
                 Get started
@@ -184,7 +185,7 @@ export default function LandingPage() {
               </button>
               )}
             <a
-              href="http://localhost:3000/login"
+              href={`${AUTH_URL}/login`}
               className="px-6 py-2.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
             >
               View docs

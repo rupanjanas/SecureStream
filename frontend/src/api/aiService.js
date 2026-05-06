@@ -1,5 +1,5 @@
-const AUTH_URL = "http://localhost:3000";
-const AI_URL   = "http://localhost:8000";
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 
 export async function getSession() {
   const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });
@@ -57,7 +57,7 @@ const token = session.access_token;
   const isExpired = payload.exp * 1000 < Date.now();
 
   if (isExpired) {
-    window.location.href = "http://localhost:3000/login";
+    window.location.href = `${AUTH_URL}/login`;
     return;
   }
 
