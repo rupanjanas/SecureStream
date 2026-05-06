@@ -1,9 +1,6 @@
-from urllib import response
-
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException  # type: ignore[import-not-found]
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
+from starlette.responses import StreamingResponse  # type: ignore[import-not-found]
 from app.auth import verify_token
 from app.ingest import ingest_document
 from app.query import answer_question, get_embedder, RAG_PROMPT,extract_keywords
@@ -11,11 +8,11 @@ from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.db import db_test, db_insert, db_rpc,db_keyword_search, HEADERS, BASE
 from app.config import settings
 
-from pydantic import BaseModel
+from pydantic import BaseModel  # type: ignore[import-not-found]
 from typing import Optional
 
-import httpx
 import json
+import httpx
 
 # ------------------ APP ------------------
 
@@ -23,7 +20,9 @@ app = FastAPI(title="SecureStream AI Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "https://securestream1.netlify.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
