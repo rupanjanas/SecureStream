@@ -17,6 +17,9 @@ import { askQuestionStream, getDocumentText } from "../api/aiService";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
+
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
 
@@ -128,7 +131,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   // ── Fetch token once ──
   useEffect(() => {
-    fetch("http://localhost:3000/", { credentials: "include" })
+    fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => { tokenRef.current = d.access_token || "dev-token"; })
       .catch(() => { tokenRef.current = "dev-token"; });
