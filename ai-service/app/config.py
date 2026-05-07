@@ -4,9 +4,9 @@ from typing import Optional
 class Settings(BaseSettings):
     supabase_url: str
     supabase_service_key: str
-    ollama_base_url: str        = "https://securestream-1-umfl.onrender.com"
+    ollama_base_url: str        = "https://securestream-2-2le8.onrender.com"
     embed_model: str            = "nomic-embed-text"
-    llm_model: str              = "mistral"
+    llm_model: str              = "mistral:7b-instruct-q4_0"
     cognito_jwks_url: Optional[str] = None   # optional — None = dev mode
     aws_region: Optional[str]       = None
     cognito_user_pool_id: Optional[str] = None
