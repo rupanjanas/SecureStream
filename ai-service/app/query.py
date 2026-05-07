@@ -42,7 +42,10 @@ _reranker                               = None   # lazy-loaded cross-encoder
 def get_embedder() -> OllamaEmbeddings:
     global _embedder
     if _embedder is None:
-        _embedder = OllamaEmbeddings(model=settings.embed_model)
+        _embedder = OllamaEmbeddings(
+            model=settings.embed_model,
+            base_url=settings.ollama_base_url,
+        )
     return _embedder
 
 
@@ -50,10 +53,11 @@ def get_llm() -> OllamaLLM:
     global _llm
     if _llm is None:
         _llm = OllamaLLM(
-            model       = settings.llm_model,
-            temperature = 0.1,
-            num_predict = 512,
-            num_ctx     = 2048,
+            model=settings.llm_model,
+            base_url=settings.ollama_base_url,
+            temperature=0.1,
+            num_predict=512,
+            num_ctx=2048,
         )
     return _llm
 
