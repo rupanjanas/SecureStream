@@ -1,34 +1,159 @@
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+"""
+ingest.py — production-grade ingestion pipeline
+------------------------------------------------
+Changes vs original:
+  1. Semantic chunking  — split on sentence boundaries, merge until size limit
+  2. SimHash dedup      — near-duplicate chunks rejected at ingest time
+  3. Hierarchy metadata — doc → section → chunk (index, total, section heading)
+  4. Embeddings offline — computed once here, never at query time
+  5. Domain tagging     — optional X-Domain header for sub-tenant partitioning
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import tempfile
+import uuid
+from typing import Optional
+
+import httpx
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_ollama import OllamaEmbeddings
+
 from app.config import settings
 from app.db import db_insert
-import tempfile, os, re
-import httpx
-import uuid
 
-# Lazy — don't init at import time
-_embedder = None
+# ──────────────────────────────────────────────
+# Embedder (singleton)
+# ──────────────────────────────────────────────
 
-def get_embedder():
+_embedder: Optional[OllamaEmbeddings] = None
+
+
+def get_embedder() -> OllamaEmbeddings:
     global _embedder
     if _embedder is None:
         _embedder = OllamaEmbeddings(model=settings.embed_model)
     return _embedder
 
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50,
-    separators=["\n\n", "\n", ".", " "]
-)
 
-def clean_text(text: str) -> str:
+# ──────────────────────────────────────────────
+# 1. Semantic chunker
+# ──────────────────────────────────────────────
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_HEADING      = re.compile(r"^(?:[A-Z][A-Z\s]{2,}|#+\s+\S.*)$", re.MULTILINE)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Very fast sentence splitter — no NLTK dependency."""
+    return [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
+
+
+def _detect_section(text: str, position: int) -> str:
+    """Return the nearest heading above `position` in text."""
+    headings = [(m.start(), m.group()) for m in _HEADING.finditer(text)]
+    above = [h for h in headings if h[0] <= position]
+    return above[-1][1].strip() if above else "intro"
+
+
+def semantic_chunks(
+    full_text: str,
+    max_tokens: int = 400,       # ~400 words ≈ 512 tokens for nomic
+    overlap_sentences: int = 2,
+) -> list[dict]:
+    """
+    Return list of dicts:
+        {"text": str, "section": str, "char_offset": int}
+
+    Strategy:
+      - split into sentences
+      - greedily merge sentences until word-count exceeds max_tokens
+      - carry overlap_sentences from previous chunk into next
+    """
+    sentences  = _split_sentences(full_text)
+    chunks:    list[dict] = []
+    buf:       list[str]  = []
+    buf_words: int        = 0
+    char_cursor: int      = 0
+
+    def flush(buf: list[str], offset: int) -> dict:
+        text    = " ".join(buf)
+        section = _detect_section(full_text, offset)
+        return {"text": text, "section": section, "char_offset": offset}
+
+    for sent in sentences:
+        word_count = len(sent.split())
+        if buf_words + word_count > max_tokens and buf:
+            chunks.append(flush(buf, char_cursor - sum(len(s) for s in buf)))
+            buf       = buf[-overlap_sentences:]          # carry tail
+            buf_words = sum(len(s.split()) for s in buf)
+        buf.append(sent)
+        buf_words  += word_count
+        char_cursor += len(sent) + 1
+
+    if buf:
+        chunks.append(flush(buf, char_cursor - sum(len(s) for s in buf)))
+
+    return chunks
+
+
+# ──────────────────────────────────────────────
+# 2. SimHash dedup
+# ──────────────────────────────────────────────
+
+def _simhash(text: str, bits: int = 64) -> int:
+    """
+    Lightweight SimHash — no external lib needed.
+    Two chunks are near-duplicates if hamming(h1, h2) <= threshold.
+    """
+    tokens  = re.findall(r"\w+", text.lower())
+    v       = [0] * bits
+    for token in tokens:
+        h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+        for i in range(bits):
+            v[i] += 1 if (h >> i) & 1 else -1
+    return sum((1 << i) for i in range(bits) if v[i] > 0)
+
+
+def _hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+
+def deduplicate_chunks(chunks: list[dict], threshold: int = 5) -> list[dict]:
+    """
+    Remove chunks whose SimHash is within `threshold` bits of any retained chunk.
+    threshold=5 removes ~80 % word overlap; tune to taste.
+    """
+    seen_hashes: list[int] = []
+    result: list[dict]     = []
+    for chunk in chunks:
+        h = _simhash(chunk["text"])
+        if all(_hamming(h, sh) > threshold for sh in seen_hashes):
+            seen_hashes.append(h)
+            result.append(chunk)
+    return result
+
+
+# ──────────────────────────────────────────────
+# 3. Ingest orchestrator
+# ──────────────────────────────────────────────
+
+def _clean(text: str) -> str:
     text = re.sub(r"-\n", "", text)
     text = re.sub(r"\n", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
-async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict:
+
+async def ingest_document(
+    file_bytes: bytes,
+    filename:   str,
+    org_id:     str,
+    domain:     str = "general",          # sub-partition tag
+) -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -36,54 +161,82 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict
         tmp_path = tmp.name
 
     try:
-        loader = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
+        # ── load raw pages ──────────────────────────────────────
+        loader   = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
         raw_docs = loader.load()
-        chunks   = splitter.split_documents(raw_docs)
-        texts    = [clean_text(c.page_content) for c in chunks if c.page_content.strip()]
+        full_text = _clean(" ".join(d.page_content for d in raw_docs))
 
-        if not texts:
+        if not full_text:
             return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
 
-        print(f"Embedding {len(texts)} chunks for org={org_id}...")
+        # ── 1. semantic chunking ─────────────────────────────────
+        raw_chunks = semantic_chunks(full_text)
+        print(f"[ingest] {len(raw_chunks)} semantic chunks from '{filename}'")
+
+        # ── 2. aggressive dedup ──────────────────────────────────
+        deduped = deduplicate_chunks(raw_chunks, threshold=5)
+        print(f"[ingest] {len(deduped)} chunks after SimHash dedup")
+
+        texts = [c["text"] for c in deduped]
+        if not texts:
+            return {"message": "All chunks deduplicated away", "chunks_stored": 0, "doc_name": filename}
+
+        # ── 4. precompute embeddings offline ─────────────────────
+        print(f"[ingest] embedding {len(texts)} chunks…")
         vectors = get_embedder().embed_documents(texts)
-        print("Uploading to Supabase...")
+
+        # ── storage upload ───────────────────────────────────────
         file_url = await upload_to_storage(file_bytes, filename)
-        print("Upload success:", file_url)
-        rows = [
+
+        # ── 3. hierarchy metadata ────────────────────────────────
+        total = len(deduped)
+        rows  = [
             {
                 "org_id":     org_id,
                 "doc_name":   filename,
-                "chunk_text": texts[i],
+                "chunk_text": deduped[i]["text"],
                 "embedding":  vectors[i],
-                "file_url": file_url,
-                "metadata":   {"chunk_index": i, "total_chunks": len(texts)}
+                "file_url":   file_url,
+                "metadata": {
+                    "chunk_index":   i,
+                    "total_chunks":  total,
+                    "section":       deduped[i]["section"],     # hierarchy level
+                    "char_offset":   deduped[i]["char_offset"],
+                    "domain":        domain,                    # tenant partition tag
+                    "simhash":       _simhash(deduped[i]["text"]),
+                },
             }
-            for i in range(len(texts))
+            for i in range(total)
         ]
-        
+
         await db_insert("documents", rows)
-        print(f"Ingested {len(rows)} chunks for org={org_id}")
-        return {"message": "Ingested successfully", "chunks_stored": len(rows), "doc_name": filename}
+        print(f"[ingest] stored {total} chunks for org={org_id}")
+        return {"message": "Ingested successfully", "chunks_stored": total, "doc_name": filename}
+
     finally:
         os.unlink(tmp_path)
-        
-async def upload_to_storage(file_bytes: bytes, filename: str):
-    filename = f"{uuid.uuid4()}_{filename}"
-    url = f"{settings.supabase_url}/storage/v1/object/documents/{filename}"
+
+
+# ──────────────────────────────────────────────
+# Storage helper (unchanged API, cleaner impl)
+# ──────────────────────────────────────────────
+
+async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
+    unique_name = f"{uuid.uuid4()}_{filename}"
+    url         = f"{settings.supabase_url}/storage/v1/object/documents/{unique_name}"
 
     async with httpx.AsyncClient() as client:
         r = await client.post(
             url,
             headers={
-                "apikey": settings.supabase_service_key,
+                "apikey":        settings.supabase_service_key,
                 "Authorization": f"Bearer {settings.supabase_service_key}",
-                "Content-Type": "application/pdf"
+                "Content-Type":  "application/pdf",
             },
-            content=file_bytes
+            content=file_bytes,
+            timeout=60,
         )
-
         if r.status_code not in (200, 201):
             raise Exception(f"Storage upload failed: {r.text}")
 
-    # public URL
-    return f"{settings.supabase_url}/storage/v1/object/public/documents/{filename}"
+    return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}"
