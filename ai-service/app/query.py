@@ -44,7 +44,6 @@ def get_embedder() -> OllamaEmbeddings:
     if _embedder is None:
         _embedder = OllamaEmbeddings(
             model=settings.embed_model,
-            base_url=settings.ollama_base_url,
         )
     return _embedder
 
@@ -54,7 +53,6 @@ def get_llm() -> OllamaLLM:
     if _llm is None:
         _llm = OllamaLLM(
             model=settings.llm_model,
-            base_url=settings.ollama_base_url,
             temperature=0.1,
             num_predict=512,
             num_ctx=2048,
