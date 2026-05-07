@@ -18,7 +18,8 @@ import asyncio
 import json
 import re
 from typing import Optional
-
+import os
+import ollama
 import numpy as np
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain.prompts import PromptTemplate
@@ -29,7 +30,7 @@ from app.cache import (
     get_cached, set_cached,
     get_semantic_cache, set_semantic_cache,
 )
-
+os.environ["OLLAMA_HOST"] = settings.ollama_base_url
 # ──────────────────────────────────────────────
 # Singletons
 # ──────────────────────────────────────────────
