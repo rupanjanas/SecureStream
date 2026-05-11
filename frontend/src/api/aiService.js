@@ -44,7 +44,7 @@ if (!token) {
 }
 
 // Streaming version — calls onToken for each word, onDone when finished
-export async function askQuestionStream(question, onToken, onDone, topK = 3) {
+export async function askQuestionStream(question, onToken, onDone, topK = 3, currentDocName) {
   const session = await getSession();
   console.log("SESSION:", session);
 if (!session || !session.access_token) {
@@ -67,7 +67,7 @@ const token = session.access_token;
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,   // ✅ FIXED
     },
-    body: JSON.stringify({ question, top_k: topK })
+    body: JSON.stringify({ question,doc_name: currentDocName, top_k: topK })
   });
 
   if (!res.ok) throw new Error(await res.text());
@@ -126,50 +126,6 @@ export async function getDocumentText(docName, token) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
-
-export async function askQuestion(question, topK = 3) {
-  const session = await getSession();
-  const token = session.access_token;
-  console.log("SESSION:", session);
-
-  if (!session || !session.access_token) {
-    throw new Error("User not authenticated. Please login again.");
-  }  
-
-   if (!token) {
-    throw new Error("No token found.");
-  }
-
-  // ✅ THEN use token
-  const payload = JSON.parse(atob(token.split(".")[1]));
-  const isExpired = payload.exp * 1000 < Date.now();
-
-  if (isExpired) {
-    console.log("Token expired. Please login again.");
-    return;
-  }
-
-  const res = await fetch(`${AI_URL}/query`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      question: question,
-      top_k: Number(topK),
-    }),
-  });
-
-  if (!res.ok) {
-    const error = await res.text();
-    console.error("QUERY ERROR:", error);
-    throw new Error(error);
-  }
-
-  return res.json();
-}
-
 
 export async function getHealth() {
   try {

@@ -181,11 +181,12 @@ async def query_stream(
     async def vs(): return await db_rpc("match_documents", {
         "query_embedding": query_vector,
         "match_count":     8,
-        "filter_org_id":   org_id
+        "filter_org_id":   org_id,
+        "filter_doc_name": body.doc_name or ""
     })
     async def ks():
         results = []
-        tasks   = [db_keyword_search(org_id, kw) for kw in keywords[:3]]
+        tasks   = [db_keyword_search(org_id, kw,doc_name=body.doc_name) for kw in keywords[:3]]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         for b in batches:
             if isinstance(b, list): results.extend(b)

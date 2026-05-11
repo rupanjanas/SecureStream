@@ -446,8 +446,12 @@ STOP_WORDS = {
 
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
-    template="""You are a precise assistant for SecureStream. Answer using ONLY the context.
-Be concise — 2-4 sentences. If not found, say: "Not found in uploaded documents."
+    template="""You are a precise assistant for SecureStream.
+Answer using ONLY the context below. Quote exact sentences from the document.
+If the context does not contain enough information to answer, say exactly:
+"Not found in the uploaded document."
+Do NOT make up information. Do NOT reference URLs or bibliography entries.
+Ignore any context that appears to be a citation, reference list, or URL.
 
 Context:
 {context}

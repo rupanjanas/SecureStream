@@ -9,7 +9,8 @@ class IngestResponse(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     top_k: int =3          # how many chunks to retrieve
-
+    doc_name: Optional[str] = None
+    
 class QueryResponse(BaseModel):
     answer: str
     sources: list[str]      # chunk previews used to answer
