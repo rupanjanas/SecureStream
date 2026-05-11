@@ -10,7 +10,7 @@ Changes vs original:
   9.  Embeddings precomputed at ingest; only query vector computed here
   10. top_k candidate pool = 10, rerank → keep 5, feed 3 to LLM
   11. Context compressed to ≤ 8 k chars (~2 k tokens) via extractive sentence scoring
-"""
+
 
 from __future__ import annotations
 
@@ -62,11 +62,11 @@ def get_llm() -> OllamaLLM:
 
 
 def get_reranker():
-    """
+    
     Lazy-load cross-encoder. Falls back to None gracefully if
     sentence-transformers is not installed — retrieval still works,
     just without the reranking step.
-    """
+    
     global _reranker
     if _reranker is not None:
         return _reranker
@@ -86,7 +86,7 @@ def get_reranker():
 
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
-    template="""You are a concise assistant for SecureStream.
+    template=You are a concise assistant for SecureStream.
 Answer using ONLY the context below.
 Be brief — 2-4 sentences maximum.
 If the answer is in the context, you MUST return it.
@@ -97,7 +97,7 @@ Context:
 
 Question: {question}
 
-Answer:""",
+Answer:,
 )
 
 
@@ -121,12 +121,12 @@ def extract_keywords(question: str) -> list[str]:
 
 
 def _bm25_score(query_terms: list[str], corpus: list[str]) -> list[float]:
-    """
+    
     Pure-Python BM25 (Okapi).  No external lib — avoids rank_bm25 import
     pain on restricted envs.  Good enough for corpora < 200 chunks.
 
     If rank_bm25 is installed it takes over automatically (10× faster).
-    """
+    
     try:
         from rank_bm25 import BM25Okapi                        # type: ignore
         tokenized = [re.findall(r"\w+", c.lower()) for c in corpus]
@@ -169,7 +169,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _rrf(rankings: list[list[int]], k: int = 60) -> list[float]:
-    """Reciprocal Rank Fusion over multiple ranked lists of indices."""
+    Reciprocal Rank Fusion over multiple ranked lists of indices.
     n      = max(max(r) for r in rankings if r) + 1
     scores = [0.0] * n
     for ranked in rankings:
@@ -184,11 +184,11 @@ async def hybrid_retrieve(
     domain:      str = "general",
     candidate_k: int = 10,         # pool before reranking
 ) -> list[dict]:
-    """
+    
     Returns up to candidate_k chunks, fused from:
       A) pgvector ANN (embedding similarity)
       B) keyword ilike search (BM25-scored client-side)
-    """
+    
     loop = asyncio.get_event_loop()
 
     # ── A: embedding search ────────────────────────────────────
@@ -249,10 +249,9 @@ async def hybrid_retrieve(
 # ──────────────────────────────────────────────
 
 def rerank(question: str, chunks: list[dict], top_n: int = 5) -> list[dict]:
-    """
+    
     Re-rank `chunks` with a cross-encoder.  Falls back to RRF order if
     the model is unavailable.
-    """
     reranker = get_reranker()
     if not reranker:
         return chunks[:top_n]
@@ -282,11 +281,11 @@ def compress_context(
     question:     str,
     max_chars:    int = 8_000,       # ≈ 2 k tokens; raise to 32 k if on GPU
 ) -> str:
-    """
+    
     For each chunk, score sentences by query-term overlap.
     Keep top sentences until max_chars budget is consumed.
     Preserves intra-chunk sentence order.
-    """
+    
     query_terms = set(re.findall(r"\w+", question.lower())) - STOP_WORDS
     budget      = max_chars
     parts: list[str] = []
@@ -330,11 +329,11 @@ async def _semantic_cache_lookup(
     org_id:   str,
     loop:     asyncio.AbstractEventLoop,
 ) -> Optional[dict]:
-    """
+    
     Embed the incoming question.  Compare against stored query embeddings
     in Redis (set_semantic_cache stores them).  Return cached result if
     cosine similarity > threshold.
-    """
+    
     q_vec = await loop.run_in_executor(
         None, get_embedder().embed_query, question
     )
@@ -424,6 +423,189 @@ async def answer_question(
         "org_id":   org_id,
         "question": question,
         "answer":   answer,
+    }]))
+
+    return result"""
+    
+from langchain.prompts import PromptTemplate
+from app.config import settings
+from app.db import db_rpc, db_insert
+from app.cache import get_cached, set_cached
+from app.ingest import embed_texts
+import asyncio, re, httpx
+
+# ── Groq LLM — fast, free, no local RAM ──
+async def ask_groq(prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model":       "llama-3.1-8b-instant",  # fastest Groq model
+                "temperature": 0.1,
+                "max_tokens":  512,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+RAG_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""You are a precise assistant for SecureStream. Answer using ONLY the context.
+Be concise — 2-4 sentences. If not found, say: "Not found in uploaded documents."
+
+Context:
+{context}
+
+Question: {question}
+Answer:"""
+)
+
+STOP_WORDS = {
+    "what","is","the","a","an","of","in","on","at","to","for","and","or",
+    "are","was","were","has","have","does","do","did","this","that","with",
+    "from","by","about","how","when","where","who","which","can","will",
+    "there","any","all","tell","me","show","give","find","list"
+}
+
+def extract_keywords(question: str) -> list[str]:
+    words   = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
+    keywords = [w for w in words if w not in STOP_WORDS]
+    # Add partial stems for compound words
+    stems   = [w[:6] for w in keywords if len(w) >= 7]
+    return list(set(keywords + stems))[:6]
+
+def deduplicate_chunks(chunks: list[dict]) -> list[dict]:
+    """
+    Remove chunks that are substrings of other chunks.
+    Also remove near-identical chunks (>85% overlap).
+    """
+    seen = []
+    for c in chunks:
+        text = c.get("chunk_text", "").lower().strip()
+        is_dup = False
+        for s in seen:
+            s_text = s.get("chunk_text", "").lower().strip()
+            # Substring check
+            if text in s_text or s_text in text:
+                is_dup = True
+                break
+            # Jaccard similarity for near-duplicates
+            set_a  = set(text.split())
+            set_b  = set(s_text.split())
+            if len(set_a | set_b) > 0:
+                jaccard = len(set_a & set_b) / len(set_a | set_b)
+                if jaccard > 0.85:
+                    is_dup = True
+                    break
+        if not is_dup:
+            seen.append(c)
+    return seen
+
+def group_by_section(chunks: list[dict]) -> str:
+    """
+    Build context string grouped by document section.
+    This gives the LLM structured context instead of a flat list of passages.
+    """
+    sections: dict[str, list[str]] = {}
+    for c in chunks:
+        meta    = c.get("metadata") or {}
+        section = meta.get("section", "General")
+        doc     = c.get("doc_name", "")
+        key     = f"{doc} › {section}" if doc else section
+        sections.setdefault(key, []).append(c["chunk_text"])
+
+    parts = []
+    for section_label, texts in sections.items():
+        parts.append(f"[{section_label}]")
+        parts.extend(f"  {t}" for t in texts)
+    return "\n".join(parts)
+
+async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
+
+    # Cache hit — instant return
+    cached = await get_cached(org_id, question)
+    if cached:
+        print(f"Cache HIT org={org_id}")
+        return cached
+
+    # Embed question (Jina API — no local RAM)
+    query_vectors = await embed_texts([question])
+    query_vector  = query_vectors[0]
+
+    # Parallel: vector search + keyword search
+    keywords = extract_keywords(question)
+
+    async def vector_search():
+        return await db_rpc("match_documents", {
+            "query_embedding": query_vector,
+            "match_count":     top_k * 2,   # fetch more, deduplicate below
+            "filter_org_id":   org_id
+        })
+
+    async def keyword_search():
+        from app.db import db_keyword_search
+        results = []
+        # Run keyword searches in parallel
+        tasks = [db_keyword_search(org_id, kw) for kw in keywords[:3]]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        for batch in batches:
+            if isinstance(batch, list):
+                results.extend(batch)
+        return results
+
+    # Fire both searches simultaneously
+    vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
+
+    # Merge: keyword results first (higher precision), then vector results
+    combined = kw_chunks + vec_chunks
+
+    # Deduplicate aggressively
+    unique = deduplicate_chunks(combined)
+
+    # Take top_k after dedup
+    top = unique[:top_k]
+
+    if not top:
+        return {
+            "answer":          "No relevant documents found for your organization.",
+            "sources":         [],
+            "source_passages": [],
+            "org_id":          org_id
+        }
+
+    # Build structured context grouped by section
+    context = group_by_section(top)
+
+    prompt  = RAG_PROMPT.format(context=context, question=question)
+    answer  = await ask_groq(prompt)
+
+    source_passages = [
+        {
+            "doc_name":   c["doc_name"],
+            "passage":    c["chunk_text"],
+            "similarity": round(c.get("similarity", 0), 3),
+            "section":    (c.get("metadata") or {}).get("section", "")
+        }
+        for c in top
+    ]
+
+    result = {
+        "answer":          answer,
+        "sources":         [c["chunk_text"][:200] + "..." for c in top],
+        "source_passages": source_passages,
+        "org_id":          org_id
+    }
+
+    await set_cached(org_id, question, result, ttl=300)
+    asyncio.create_task(db_insert("query_logs", [{
+        "org_id":   org_id,
+        "question": question,
+        "answer":   answer
     }]))
 
     return result

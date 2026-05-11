@@ -7,7 +7,7 @@ Changes vs original:
   3. Hierarchy metadata — doc → section → chunk (index, total, section heading)
   4. Embeddings offline — computed once here, never at query time
   5. Domain tagging     — optional X-Domain header for sub-tenant partitioning
-"""
+
 
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ _HEADING      = re.compile(r"^(?:[A-Z][A-Z\s]{2,}|#+\s+\S.*)$", re.MULTILINE)
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Very fast sentence splitter — no NLTK dependency."""
+    Very fast sentence splitter — no NLTK dependency
     return [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
 
 
 def _detect_section(text: str, position: int) -> str:
-    """Return the nearest heading above `position` in text."""
+    Return the nearest heading above `position` in text.
     headings = [(m.start(), m.group()) for m in _HEADING.finditer(text)]
     above = [h for h in headings if h[0] <= position]
     return above[-1][1].strip() if above else "intro"
@@ -64,7 +64,7 @@ def semantic_chunks(
     max_tokens: int = 400,       # ~400 words ≈ 512 tokens for nomic
     overlap_sentences: int = 2,
 ) -> list[dict]:
-    """
+    
     Return list of dicts:
         {"text": str, "section": str, "char_offset": int}
 
@@ -72,7 +72,7 @@ def semantic_chunks(
       - split into sentences
       - greedily merge sentences until word-count exceeds max_tokens
       - carry overlap_sentences from previous chunk into next
-    """
+    
     sentences  = _split_sentences(full_text)
     chunks:    list[dict] = []
     buf:       list[str]  = []
@@ -105,10 +105,10 @@ def semantic_chunks(
 # ──────────────────────────────────────────────
 
 def _simhash(text: str, bits: int = 64) -> int:
-    """
+    
     Lightweight SimHash — no external lib needed.
     Two chunks are near-duplicates if hamming(h1, h2) <= threshold.
-    """
+    
     tokens  = re.findall(r"\w+", text.lower())
     v       = [0] * bits
     for token in tokens:
@@ -123,10 +123,9 @@ def _hamming(a: int, b: int) -> int:
 
 
 def deduplicate_chunks(chunks: list[dict], threshold: int = 5) -> list[dict]:
-    """
+    
     Remove chunks whose SimHash is within `threshold` bits of any retained chunk.
     threshold=5 removes ~80 % word overlap; tune to taste.
-    """
     seen_hashes: list[int] = []
     result: list[dict]     = []
     for chunk in chunks:
@@ -239,4 +238,205 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
         if r.status_code not in (200, 201):
             raise Exception(f"Storage upload failed: {r.text}")
 
-    return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}"
+    return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
+    
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from app.config import settings
+from app.db import db_insert
+import tempfile, os, re, hashlib
+import httpx
+
+# ── Jina embeddings (free, no local RAM) ──
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "input": texts,
+                "model": "jina-embeddings-v3",
+                "task": "retrieval.passage"
+            }
+        )
+        r.raise_for_status()
+        data = r.json()
+        return [item["embedding"] for item in data["data"]]
+
+# ── Semantic chunking — split on meaning, not token count ──
+def semantic_chunks(text: str) -> list[dict]:
+    """
+    Split text into semantic units:
+    1. Split on paragraph boundaries first (double newline)
+    2. If a paragraph is too long, split on sentence boundaries
+    3. If still too long, split on clause boundaries (semicolon, colon, em-dash)
+    Never split mid-sentence.
+    """
+    MAX_CHARS  = 800   # ~200 tokens, enough context without noise
+    MIN_CHARS  = 80    # ignore tiny fragments
+    
+    chunks = []
+    
+    # Level 1: paragraphs
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    
+    for para in paragraphs:
+        if len(para) <= MAX_CHARS:
+            if len(para) >= MIN_CHARS:
+                chunks.append({"text": para, "level": "paragraph"})
+        else:
+            # Level 2: sentences
+            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
+            current   = ""
+            for sent in sentences:
+                if len(current) + len(sent) <= MAX_CHARS:
+                    current += (" " if current else "") + sent
+                else:
+                    if len(current) >= MIN_CHARS:
+                        chunks.append({"text": current.strip(), "level": "sentence"})
+                    # Level 3: clauses for very long sentences
+                    if len(sent) > MAX_CHARS:
+                        clauses = re.split(r'(?<=[;:])\s+', sent)
+                        buf = ""
+                        for clause in clauses:
+                            if len(buf) + len(clause) <= MAX_CHARS:
+                                buf += (" " if buf else "") + clause
+                            else:
+                                if len(buf) >= MIN_CHARS:
+                                    chunks.append({"text": buf.strip(), "level": "clause"})
+                                buf = clause
+                        if len(buf) >= MIN_CHARS:
+                            chunks.append({"text": buf.strip(), "level": "clause"})
+                        current = ""
+                    else:
+                        current = sent
+            if len(current) >= MIN_CHARS:
+                chunks.append({"text": current.strip(), "level": "sentence"})
+    
+    return chunks
+
+def clean(text: str) -> str:
+    text = re.sub(r'-\n', '', text)          # fix PDF hyphenation
+    text = re.sub(r'\n', ' ', text)          # flatten newlines
+    text = re.sub(r'\s+', ' ', text)         # normalize spaces
+    text = re.sub(r'[^\x00-\x7F]+', '', text) # strip non-ASCII garbage
+    return text.strip()
+
+def fingerprint(text: str) -> str:
+    # Normalize aggressively before hashing — catches near-duplicates
+    normalized = re.sub(r'\s+', ' ', text.lower().strip())
+    normalized = re.sub(r'[^\w\s]', '', normalized)  # strip punctuation
+    return hashlib.md5(normalized.encode()).hexdigest()
+
+# ── Hierarchical metadata ──
+def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
+    """
+    Assign section context to each chunk.
+    Detects headers heuristically (short lines, title case, ends without period).
+    Adds parent_section to each chunk's metadata so retrieval is structured.
+    """
+    result        = []
+    current_section = "Introduction"
+    section_idx     = 0
+    chunk_in_section = 0
+
+    for i, chunk in enumerate(chunks):
+        text = chunk["text"]
+        
+        # Heuristic: is this a section header?
+        is_header = (
+            len(text) < 120
+            and not text.endswith('.')
+            and (text.istitle() or text.isupper() or re.match(r'^\d+[\.\)]\s+', text))
+        )
+        
+        if is_header:
+            current_section  = text
+            section_idx     += 1
+            chunk_in_section = 0
+            continue  # don't store headers as chunks — store as metadata only
+        
+        chunk_in_section += 1
+        result.append({
+            "text":     text,
+            "level":    chunk.get("level", "paragraph"),
+            "metadata": {
+                "chunk_index":       i,
+                "section":           current_section,
+                "section_index":     section_idx,
+                "position_in_section": chunk_in_section,
+                "doc_name":          doc_name,
+                "char_count":        len(text)
+            }
+        })
+    
+    return result
+
+async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict:
+    suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        # Load
+        loader   = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
+        raw_docs = loader.load()
+        full_text = clean(" ".join(d.page_content for d in raw_docs))
+
+        if not full_text:
+            return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
+
+        # Semantic chunk
+        raw_chunks = semantic_chunks(full_text)
+
+        # Build hierarchy
+        structured = build_hierarchy(raw_chunks, filename)
+
+        if not structured:
+            return {"message": "No chunks after processing", "chunks_stored": 0, "doc_name": filename}
+
+        # Aggressive deduplication — fingerprint before embedding (saves API calls)
+        seen_fps    = set()
+        unique      = []
+        for c in structured:
+            fp = fingerprint(c["text"])
+            if fp not in seen_fps:
+                seen_fps.add(fp)
+                unique.append(c)
+
+        print(f"[{filename}] {len(raw_chunks)} raw → {len(structured)} structured → {len(unique)} after dedup")
+
+        texts = [c["text"] for c in unique]
+
+        # Embed in batches of 32 (Jina limit per request)
+        all_vectors = []
+        for i in range(0, len(texts), 32):
+            batch   = texts[i:i+32]
+            vectors = await embed_texts(batch)
+            all_vectors.extend(vectors)
+
+        # Build rows with full hierarchy metadata
+        rows = [
+            {
+                "org_id":     org_id,
+                "doc_name":   filename,
+                "chunk_text": unique[i]["text"],
+                "embedding":  all_vectors[i],
+                "metadata":   unique[i]["metadata"]
+            }
+            for i in range(len(unique))
+        ]
+
+        await db_insert("documents", rows)
+
+        return {
+            "message":      "Ingested successfully",
+            "chunks_stored": len(rows),
+            "doc_name":      filename
+        }
+    finally:
+        os.unlink(tmp_path)

@@ -161,99 +161,91 @@ async def ingest(
 
 @app.post("/query/stream")
 async def query_stream(
-    body:     QueryRequest,
-    claims:   dict = Depends(verify_token),
-    x_domain: str  = Header(default="general"),
+    body: QueryRequest,
+    claims: dict = Depends(verify_token)
 ):
-    org_id = claims.get("sub")
+    org_id = claims.get("custom:org_id") or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
-    # ── 4+5. hybrid retrieve ──────────────────────────────────
-    candidates = await hybrid_retrieve(
-        body.question, org_id, domain=x_domain, candidate_k=10
-    )
+    from app.query import extract_keywords, deduplicate_chunks, group_by_section, RAG_PROMPT
+    from app.db import db_rpc, db_keyword_search
+    from app.ingest import embed_texts
 
-    if not candidates:
-        async def empty_stream():
-            yield f"data: {json.dumps({'token': 'No relevant documents found.'})}\n\n"
+    # Embed + search (same as non-streaming)
+    query_vectors = await embed_texts([body.question])
+    query_vector  = query_vectors[0]
+    keywords      = extract_keywords(body.question)
+
+    async def vs(): return await db_rpc("match_documents", {
+        "query_embedding": query_vector,
+        "match_count":     8,
+        "filter_org_id":   org_id
+    })
+    async def ks():
+        results = []
+        tasks   = [db_keyword_search(org_id, kw) for kw in keywords[:3]]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        for b in batches:
+            if isinstance(b, list): results.extend(b)
+        return results
+
+    vec, kw  = await asyncio.gather(vs(), ks())
+    combined = deduplicate_chunks(kw + vec)[:body.top_k]
+
+    if not combined:
+        async def empty():
+            yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
-        return StreamingResponse(empty_stream(), media_type="text/event-stream")
+        return StreamingResponse(empty(), media_type="text/event-stream")
 
-    # ── 6. rerank → top 5 ─────────────────────────────────────
-    reranked   = rerank(body.question, candidates, top_n=5)
-    top_chunks = reranked[:3]     # 10. top 3 to LLM
-
-    # ── 11. compress context ───────────────────────────────────
-    context = compress_context(top_chunks, body.question, max_chars=8_000)
-
-    prompt = RAG_PROMPT.format(context=context, question=body.question)
+    context = group_by_section(combined)
+    prompt  = RAG_PROMPT.format(context=context, question=body.question)
 
     source_passages = [
         {
             "doc_name":   c["doc_name"],
             "passage":    c["chunk_text"],
             "similarity": round(c.get("similarity", 0), 3),
+            "section":    (c.get("metadata") or {}).get("section", "")
         }
-        for c in top_chunks
+        for c in combined
     ]
 
-    # ── stream tokens ─────────────────────────────────────────
-    async def stream_tokens():
-        try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    f"{settings.ollama_base_url}/api/generate",
-                    json={
-                        "model":  settings.llm_model,
-                        "prompt": prompt,
-                        "stream": True,
-                        "options": {
-                            "temperature": 0.1,
-                            "num_predict": 256,   # tighter = faster first token
-                            "num_ctx":     2048,
-                        },
-                    },
-                ) as resp:
-                    async for line in resp.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                            if "response" in data:
-                                yield f"data: {json.dumps({'token': data['response']})}\n\n"
-                            if data.get("done"):
-                                yield "data: " + json.dumps({
-                                    "done":            True,
-                                    "sources":         [c["chunk_text"][:200] + "…" for c in top_chunks],
-                                    "source_passages": source_passages,
-                                }) + "\n\n"
-                                break
-                        except Exception:
-                            continue
-        except Exception:
-            yield f"data: {json.dumps({'token': 'Error generating response'})}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
+    async def stream_groq():
+        async with httpx.AsyncClient(timeout=30) as client:
+            async with client.stream(
+                "POST",
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.groq_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model":       "llama-3.1-8b-instant",
+                    "temperature": 0.1,
+                    "max_tokens":  512,
+                    "stream":      True,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            ) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        chunk  = json.loads(line[6:])
+                        token  = chunk["choices"][0]["delta"].get("content", "")
+                        if token:
+                            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                    except Exception:
+                        continue
+                yield f"data: {json.dumps({'done': True, 'sources': [c['chunk_text'][:200]+'...' for c in combined], 'source_passages': source_passages})}\n\n"
 
-    return StreamingResponse(stream_tokens(), media_type="text/event-stream")
-
-
-# ──────────────────────────────────────────────
-# Normal query
-# ──────────────────────────────────────────────
-
-@app.post("/query", response_model=QueryResponse)
-async def query(
-    body:     QueryRequest,
-    claims:   dict = Depends(verify_token),
-    x_domain: str  = Header(default="general"),
-):
-    org_id = claims.get("sub")
-    if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id in token")
-
-    return await answer_question(body.question, org_id, body.top_k, domain=x_domain)
+    return StreamingResponse(
+        stream_groq(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 # ──────────────────────────────────────────────
