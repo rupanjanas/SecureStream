@@ -18,6 +18,7 @@ from typing import Optional
 
 import json
 import httpx
+import asyncio
 
 from app.auth import verify_token
 from app.ingest import ingest_document

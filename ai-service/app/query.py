@@ -434,24 +434,15 @@ from app.cache import get_cached, set_cached
 from app.ingest import embed_texts
 import asyncio, re, httpx
 
-# ── Groq LLM — fast, free, no local RAM ──
-async def ask_groq(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.groq_api_key}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model":       "llama-3.1-8b-instant",  # fastest Groq model
-                "temperature": 0.1,
-                "max_tokens":  512,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+STOP_WORDS = {
+    "what","is","the","a","an","of","in","on","at","to","for","and","or",
+    "are","was","were","has","have","does","do","did","this","that","with",
+    "from","by","about","how","when","where","who","which","can","will",
+    "there","any","all","tell","me","show","give","find","list"
+}
 
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
@@ -465,38 +456,53 @@ Question: {question}
 Answer:"""
 )
 
-STOP_WORDS = {
-    "what","is","the","a","an","of","in","on","at","to","for","and","or",
-    "are","was","were","has","have","does","do","did","this","that","with",
-    "from","by","about","how","when","where","who","which","can","will",
-    "there","any","all","tell","me","show","give","find","list"
-}
+
+# ── Groq LLM ──────────────────────────────────────────────────────────────────
+
+async def ask_groq(prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model":       "llama-3.1-8b-instant",
+                "temperature": 0.1,
+                "max_tokens":  512,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+
+# ── Pure helpers ──────────────────────────────────────────────────────────────
+
+def get_embedder():
+    from app.ingest import embed_texts
+    return embed_texts
+
 
 def extract_keywords(question: str) -> list[str]:
-    words   = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
+    words    = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
     keywords = [w for w in words if w not in STOP_WORDS]
-    # Add partial stems for compound words
-    stems   = [w[:6] for w in keywords if len(w) >= 7]
+    stems    = [w[:6] for w in keywords if len(w) >= 7]
     return list(set(keywords + stems))[:6]
 
+
 def deduplicate_chunks(chunks: list[dict]) -> list[dict]:
-    """
-    Remove chunks that are substrings of other chunks.
-    Also remove near-identical chunks (>85% overlap).
-    """
     seen = []
     for c in chunks:
-        text = c.get("chunk_text", "").lower().strip()
+        text   = c.get("chunk_text", "").lower().strip()
         is_dup = False
         for s in seen:
             s_text = s.get("chunk_text", "").lower().strip()
-            # Substring check
             if text in s_text or s_text in text:
                 is_dup = True
                 break
-            # Jaccard similarity for near-duplicates
-            set_a  = set(text.split())
-            set_b  = set(s_text.split())
+            set_a, set_b = set(text.split()), set(s_text.split())
             if len(set_a | set_b) > 0:
                 jaccard = len(set_a & set_b) / len(set_a | set_b)
                 if jaccard > 0.85:
@@ -506,11 +512,8 @@ def deduplicate_chunks(chunks: list[dict]) -> list[dict]:
             seen.append(c)
     return seen
 
+
 def group_by_section(chunks: list[dict]) -> str:
-    """
-    Build context string grouped by document section.
-    This gives the LLM structured context instead of a flat list of passages.
-    """
     sections: dict[str, list[str]] = {}
     for c in chunks:
         meta    = c.get("metadata") or {}
@@ -525,50 +528,101 @@ def group_by_section(chunks: list[dict]) -> str:
         parts.extend(f"  {t}" for t in texts)
     return "\n".join(parts)
 
+
+def rerank(question: str, chunks: list[dict]) -> list[dict]:
+    question_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
+
+    def score(chunk: dict) -> float:
+        text        = chunk.get("chunk_text", "").lower()
+        chunk_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+        overlap     = len(question_words & chunk_words) / max(len(question_words), 1)
+        similarity  = chunk.get("similarity", 0.0)
+        return 0.6 * similarity + 0.4 * overlap
+
+    return sorted(chunks, key=score, reverse=True)
+
+
+def compress_context(chunks: list[dict], max_tokens: int = 1500) -> list[dict]:
+    budget     = int(max_tokens * 0.75)
+    kept       = []
+    used_words = 0
+
+    for chunk in chunks:
+        text       = chunk.get("chunk_text", "")
+        word_count = len(text.split())
+        if used_words + word_count > budget:
+            remaining = budget - used_words
+            if remaining > 40:
+                trimmed = " ".join(text.split()[:remaining]) + "…"
+                kept.append({**chunk, "chunk_text": trimmed})
+            break
+        kept.append(chunk)
+        used_words += word_count
+
+    return kept
+
+
+# ── Async pipeline ────────────────────────────────────────────────────────────
+
+async def hybrid_retrieve(question: str, org_id: str, top_k: int = 6) -> list[dict]:
+    from app.db import db_keyword_search
+
+    query_vector = (await embed_texts([question]))[0]
+    keywords     = extract_keywords(question)
+
+    async def vector_search():
+        return await db_rpc("match_documents", {
+            "query_embedding": query_vector,
+            "match_count":     top_k * 2,
+            "filter_org_id":   org_id,
+        })
+
+    async def keyword_search():
+        results = []
+        batches = await asyncio.gather(
+            *[db_keyword_search(org_id, kw) for kw in keywords[:3]],
+            return_exceptions=True
+        )
+        for b in batches:
+            if isinstance(b, list):
+                results.extend(b)
+        return results
+
+    vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
+    return deduplicate_chunks(kw_chunks + vec_chunks)[:top_k]
+
+
 async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
 
-    # Cache hit — instant return
     cached = await get_cached(org_id, question)
     if cached:
         print(f"Cache HIT org={org_id}")
         return cached
 
-    # Embed question (Jina API — no local RAM)
-    query_vectors = await embed_texts([question])
-    query_vector  = query_vectors[0]
-
-    # Parallel: vector search + keyword search
-    keywords = extract_keywords(question)
+    query_vector = (await embed_texts([question]))[0]
+    keywords     = extract_keywords(question)
 
     async def vector_search():
         return await db_rpc("match_documents", {
             "query_embedding": query_vector,
-            "match_count":     top_k * 2,   # fetch more, deduplicate below
+            "match_count":     top_k * 2,
             "filter_org_id":   org_id
         })
 
     async def keyword_search():
         from app.db import db_keyword_search
         results = []
-        # Run keyword searches in parallel
-        tasks = [db_keyword_search(org_id, kw) for kw in keywords[:3]]
-        batches = await asyncio.gather(*tasks, return_exceptions=True)
-        for batch in batches:
-            if isinstance(batch, list):
-                results.extend(batch)
+        batches = await asyncio.gather(
+            *[db_keyword_search(org_id, kw) for kw in keywords[:3]],
+            return_exceptions=True
+        )
+        for b in batches:
+            if isinstance(b, list):
+                results.extend(b)
         return results
 
-    # Fire both searches simultaneously
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
-
-    # Merge: keyword results first (higher precision), then vector results
-    combined = kw_chunks + vec_chunks
-
-    # Deduplicate aggressively
-    unique = deduplicate_chunks(combined)
-
-    # Take top_k after dedup
-    top = unique[:top_k]
+    top = deduplicate_chunks(kw_chunks + vec_chunks)[:top_k]
 
     if not top:
         return {
@@ -578,9 +632,7 @@ async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
             "org_id":          org_id
         }
 
-    # Build structured context grouped by section
     context = group_by_section(top)
-
     prompt  = RAG_PROMPT.format(context=context, question=question)
     answer  = await ask_groq(prompt)
 
