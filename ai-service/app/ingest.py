@@ -363,6 +363,7 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
             "text":     text,
             "level":    chunk.get("level", "paragraph"),
             "metadata": {
+                "domain":            "general",  # static for now, can be dynamic per doc
                 "chunk_index":       i,
                 "section":           current_section,
                 "section_index":     section_idx,
@@ -374,7 +375,7 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     
     return result
 
-async def ingest_document(file_bytes: bytes, filename: str, org_id: str) -> dict:
+async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: str = "general") -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
