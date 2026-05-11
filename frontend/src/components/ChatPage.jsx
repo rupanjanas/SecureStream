@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { askQuestion } from "../api/aiService";
+import { askQuestionStream } from "../api/aiService";
 
 function Message({ msg }) {
   const isUser = msg.role === "user";
@@ -63,7 +63,7 @@ export default function ChatPage({ user }) {
     setInput("");
     setLoading(true);
     try {
-      const data = await askQuestion(question);
+      const data = await askQuestionStream(question);
       setMessages((m) => [...m, {
         role: "assistant",
         content: data.answer,
