@@ -68,7 +68,11 @@ class AnnotationUpdate(BaseModel):
 # ──────────────────────────────────────────────
 # Annotations
 # ──────────────────────────────────────────────
-
+_JUNK_LINE_Q = re.compile(
+    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
+    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
+    re.IGNORECASE
+)
 @app.post("/annotations")
 async def create_annotation(
     body:   AnnotationCreate,
@@ -159,7 +163,17 @@ async def ingest(
 # ──────────────────────────────────────────────
 # Streaming query  — full pipeline
 # ──────────────────────────────────────────────
-
+def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
+    clean = []
+    for c in chunks:
+        text  = c.get("chunk_text", "")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            continue
+        junk = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
+        if (junk / len(lines)) <= 0.4:
+            clean.append(c)
+    return clean
 @app.post("/query/stream")
 async def query_stream(
     body: QueryRequest,
@@ -193,7 +207,7 @@ async def query_stream(
         return results
 
     vec, kw  = await asyncio.gather(vs(), ks())
-    combined = deduplicate_chunks(kw + vec)[:body.top_k]
+    combined = filter_junk_chunks(deduplicate_chunks(kw + vec))[:body.top_k]
 
     if not combined:
         async def empty():

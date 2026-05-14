@@ -265,6 +265,35 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         data = r.json()
         return [item["embedding"] for item in data["data"]]
 
+# Regex to detect reference/bibliography section headers
+_REF_HEADER = re.compile(
+    r'^\s*(references?|bibliography|works\s+cited|sources?|citations?|'
+    r'further\s+reading|footnotes?|endnotes?|notes?)\s*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
+# Regex to detect junk lines (URLs, DOIs, volume/issue patterns)
+_JUNK_LINE = re.compile(
+    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
+    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
+    re.IGNORECASE
+)
+
+def strip_references(text: str) -> str:
+    """Remove everything from the first references/bibliography header onward."""
+    match = _REF_HEADER.search(text)
+    if match:
+        text = text[:match.start()]
+    return text.strip()
+
+def is_junk_chunk(text: str) -> bool:
+    """Return True if a chunk is mostly citations, URLs, or reference metadata."""
+    lines      = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return True
+    junk_lines = sum(1 for l in lines if _JUNK_LINE.search(l))
+    # Reject if >40% of lines look like references/URLs
+    return (junk_lines / len(lines)) > 0.4
 # ── Semantic chunking — split on meaning, not token count ──
 def semantic_chunks(text: str) -> list[dict]:
     """
@@ -318,10 +347,11 @@ def semantic_chunks(text: str) -> list[dict]:
     return chunks
 
 def clean(text: str) -> str:
-    text = re.sub(r'-\n', '', text)          # fix PDF hyphenation
-    text = re.sub(r'\n', ' ', text)          # flatten newlines
-    text = re.sub(r'\s+', ' ', text)         # normalize spaces
-    text = re.sub(r'[^\x00-\x7F]+', '', text) # strip non-ASCII garbage
+    text = strip_references(text)          # ← NEW: drop bibliography section
+    text = re.sub(r'-\n', '', text)
+    text = re.sub(r'\n', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\x00-\x7F]+', '', text)
     return text.strip()
 
 def fingerprint(text: str) -> str:
@@ -332,47 +362,45 @@ def fingerprint(text: str) -> str:
 
 # ── Hierarchical metadata ──
 def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
-    """
-    Assign section context to each chunk.
-    Detects headers heuristically (short lines, title case, ends without period).
-    Adds parent_section to each chunk's metadata so retrieval is structured.
-    """
-    result        = []
-    current_section = "Introduction"
-    section_idx     = 0
+    result           = []
+    current_section  = "Introduction"
+    section_idx      = 0
     chunk_in_section = 0
 
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
-        
-        # Heuristic: is this a section header?
+
+        # ← NEW: skip junk (URLs, citation lines, reference metadata)
+        if is_junk_chunk(text):
+            continue
+
         is_header = (
             len(text) < 120
             and not text.endswith('.')
             and (text.istitle() or text.isupper() or re.match(r'^\d+[\.\)]\s+', text))
         )
-        
+
         if is_header:
             current_section  = text
             section_idx     += 1
             chunk_in_section = 0
-            continue  # don't store headers as chunks — store as metadata only
-        
+            continue
+
         chunk_in_section += 1
         result.append({
             "text":     text,
             "level":    chunk.get("level", "paragraph"),
             "metadata": {
-                "domain":            "general",  # static for now, can be dynamic per doc
-                "chunk_index":       i,
-                "section":           current_section,
-                "section_index":     section_idx,
+                "domain":              "general",
+                "chunk_index":         i,
+                "section":             current_section,
+                "section_index":       section_idx,
                 "position_in_section": chunk_in_section,
-                "doc_name":          doc_name,
-                "char_count":        len(text)
+                "doc_name":            doc_name,
+                "char_count":          len(text)
             }
         })
-    
+
     return result
 
 async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: str = "general") -> dict:

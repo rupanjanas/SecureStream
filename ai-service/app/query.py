@@ -483,7 +483,24 @@ async def ask_groq(prompt: str) -> str:
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
+_JUNK_LINE_Q = re.compile(
+    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
+    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
+    re.IGNORECASE
+)
 
+def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
+    """Drop any chunks that slipped through ingest and are reference/URL heavy."""
+    clean = []
+    for c in chunks:
+        text  = c.get("chunk_text", "")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            continue
+        junk  = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
+        if len(lines) == 0 or (junk / len(lines)) <= 0.4:
+            clean.append(c)
+    return clean
 def get_embedder():
     from app.ingest import embed_texts
     return embed_texts
@@ -626,8 +643,7 @@ async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
         return results
 
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
-    top = deduplicate_chunks(kw_chunks + vec_chunks)[:top_k]
-
+    top = filter_junk_chunks(deduplicate_chunks(kw_chunks + vec_chunks))[:top_k]
     if not top:
         return {
             "answer":          "No relevant documents found for your organization.",
