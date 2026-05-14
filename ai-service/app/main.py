@@ -19,7 +19,7 @@ from typing import Optional
 import json
 import httpx
 import asyncio
-
+import re
 from app.auth import verify_token
 from app.ingest import ingest_document
 from app.query import (
