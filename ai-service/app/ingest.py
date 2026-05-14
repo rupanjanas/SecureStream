@@ -240,13 +240,15 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
 
     return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
     
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain.prompts import PromptTemplate  # keep existing imports
 from app.config import settings
-from app.db import db_insert
+from app.db import db_rpc, db_insert
+from app.cache import get_cached, set_cached
 import tempfile, os, re, hashlib
 import httpx
+import fitz  # NEW: replaces PyPDFLoader
 
-# ── Jina embeddings (free, no local RAM) ──
+# ── Jina embeddings ──────────────────────────────────────────────────────────
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -265,14 +267,14 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         data = r.json()
         return [item["embedding"] for item in data["data"]]
 
-# Regex to detect reference/bibliography section headers
+
+# ── Reference/junk filtering ──────────────────────────────────────────────────
 _REF_HEADER = re.compile(
     r'^\s*(references?|bibliography|works\s+cited|sources?|citations?|'
     r'further\s+reading|footnotes?|endnotes?|notes?)\s*$',
     re.IGNORECASE | re.MULTILINE
 )
 
-# Regex to detect junk lines (URLs, DOIs, volume/issue patterns)
 _JUNK_LINE = re.compile(
     r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
     r'Issue\s+\d|Jan[-\s]June|available\s+at)',
@@ -280,52 +282,39 @@ _JUNK_LINE = re.compile(
 )
 
 def strip_references(text: str) -> str:
-    """Remove everything from the first references/bibliography header onward."""
     match = _REF_HEADER.search(text)
     if match:
         text = text[:match.start()]
     return text.strip()
 
 def is_junk_chunk(text: str) -> bool:
-    """Return True if a chunk is mostly citations, URLs, or reference metadata."""
-    lines      = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         return True
     junk_lines = sum(1 for l in lines if _JUNK_LINE.search(l))
-    # Reject if >40% of lines look like references/URLs
     return (junk_lines / len(lines)) > 0.4
-# ── Semantic chunking — split on meaning, not token count ──
+
+
+# ── Semantic chunking ─────────────────────────────────────────────────────────
 def semantic_chunks(text: str) -> list[dict]:
-    """
-    Split text into semantic units:
-    1. Split on paragraph boundaries first (double newline)
-    2. If a paragraph is too long, split on sentence boundaries
-    3. If still too long, split on clause boundaries (semicolon, colon, em-dash)
-    Never split mid-sentence.
-    """
-    MAX_CHARS  = 800   # ~200 tokens, enough context without noise
-    MIN_CHARS  = 80    # ignore tiny fragments
-    
+    MAX_CHARS = 800
+    MIN_CHARS = 80
     chunks = []
-    
-    # Level 1: paragraphs
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
-    
+
     for para in paragraphs:
         if len(para) <= MAX_CHARS:
             if len(para) >= MIN_CHARS:
                 chunks.append({"text": para, "level": "paragraph"})
         else:
-            # Level 2: sentences
             sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
-            current   = ""
+            current = ""
             for sent in sentences:
                 if len(current) + len(sent) <= MAX_CHARS:
                     current += (" " if current else "") + sent
                 else:
                     if len(current) >= MIN_CHARS:
                         chunks.append({"text": current.strip(), "level": "sentence"})
-                    # Level 3: clauses for very long sentences
                     if len(sent) > MAX_CHARS:
                         clauses = re.split(r'(?<=[;:])\s+', sent)
                         buf = ""
@@ -343,24 +332,26 @@ def semantic_chunks(text: str) -> list[dict]:
                         current = sent
             if len(current) >= MIN_CHARS:
                 chunks.append({"text": current.strip(), "level": "sentence"})
-    
+
     return chunks
 
+
 def clean(text: str) -> str:
-    text = strip_references(text)          # ← NEW: drop bibliography section
-    text = re.sub(r'-\n', '', text)
-    text = re.sub(r'\n', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = strip_references(text)          # drop bibliography section
+    text = re.sub(r'-\n', '', text)        # fix PDF hyphenation
+    text = re.sub(r'\n', ' ', text)        # flatten newlines
+    text = re.sub(r'\s+', ' ', text)       # normalize spaces
     text = re.sub(r'[^\x00-\x7F]+', '', text)
     return text.strip()
 
+
 def fingerprint(text: str) -> str:
-    # Normalize aggressively before hashing — catches near-duplicates
     normalized = re.sub(r'\s+', ' ', text.lower().strip())
-    normalized = re.sub(r'[^\w\s]', '', normalized)  # strip punctuation
+    normalized = re.sub(r'[^\w\s]', '', normalized)
     return hashlib.md5(normalized.encode()).hexdigest()
 
-# ── Hierarchical metadata ──
+
+# ── Hierarchical metadata ─────────────────────────────────────────────────────
 def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     result           = []
     current_section  = "Introduction"
@@ -370,8 +361,7 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
 
-        # ← NEW: skip junk (URLs, citation lines, reference metadata)
-        if is_junk_chunk(text):
+        if is_junk_chunk(text):      # skip URL/citation-heavy chunks
             continue
 
         is_header = (
@@ -388,8 +378,8 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
 
         chunk_in_section += 1
         result.append({
-            "text":     text,
-            "level":    chunk.get("level", "paragraph"),
+            "text":  text,
+            "level": chunk.get("level", "paragraph"),
             "metadata": {
                 "domain":              "general",
                 "chunk_index":         i,
@@ -403,7 +393,9 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
 
     return result
 
-async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: str = "general") -> dict:
+
+# ── Main ingest function ──────────────────────────────────────────────────────
+async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain: str = "general") -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -411,26 +403,29 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: 
         tmp_path = tmp.name
 
     try:
-        # Load
-        loader   = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
-        raw_docs = loader.load()
-        full_text = clean(" ".join(d.page_content for d in raw_docs))
+        # ── PDF extraction via pymupdf (fixes word-spacing bug) ──
+        if suffix == ".pdf":
+            doc = fitz.open(tmp_path)
+            pages = [page.get_text("text") for page in doc]
+            doc.close()
+            raw_text = "\n\n".join(pages)
+        else:
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+
+        full_text = clean(raw_text)
 
         if not full_text:
             return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
 
-        # Semantic chunk
         raw_chunks = semantic_chunks(full_text)
-
-        # Build hierarchy
         structured = build_hierarchy(raw_chunks, filename)
 
         if not structured:
             return {"message": "No chunks after processing", "chunks_stored": 0, "doc_name": filename}
 
-        # Aggressive deduplication — fingerprint before embedding (saves API calls)
-        seen_fps    = set()
-        unique      = []
+        seen_fps = set()
+        unique   = []
         for c in structured:
             fp = fingerprint(c["text"])
             if fp not in seen_fps:
@@ -441,21 +436,19 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: 
 
         texts = [c["text"] for c in unique]
 
-        # Embed in batches of 32 (Jina limit per request)
         all_vectors = []
         for i in range(0, len(texts), 32):
             batch   = texts[i:i+32]
             vectors = await embed_texts(batch)
             all_vectors.extend(vectors)
 
-        # Build rows with full hierarchy metadata
         rows = [
             {
                 "org_id":     org_id,
                 "doc_name":   filename,
                 "chunk_text": unique[i]["text"],
                 "embedding":  all_vectors[i],
-                "metadata":   unique[i]["metadata"]
+                "metadata":   {**unique[i]["metadata"], "domain": domain}
             }
             for i in range(len(unique))
         ]
@@ -463,7 +456,7 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str,domain: 
         await db_insert("documents", rows)
 
         return {
-            "message":      "Ingested successfully",
+            "message":       "Ingested successfully",
             "chunks_stored": len(rows),
             "doc_name":      filename
         }
