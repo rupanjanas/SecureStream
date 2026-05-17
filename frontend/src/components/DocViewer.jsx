@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
-import { retrieveFile } from "../utils/fileStore";
+import { retrieveFile } from "../utils/filestore";
 import {
   getAnnotations,
   createAnnotation,

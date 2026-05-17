@@ -2,7 +2,7 @@ import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { uploadDocument } from "../api/aiService";
-import { storeFile } from "../utils/fileStore";
+import { storeFile } from "../utils/filestore";
 
 export default function UploadPage({ user }) {
   const [dragging, setDragging] = useState(false);
