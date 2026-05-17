@@ -247,7 +247,7 @@ from app.cache import get_cached, set_cached
 import tempfile, os, re, hashlib
 import httpx
 import fitz  # NEW: replaces PyPDFLoader
-
+from app.db import HEADERS, BASE
 # ── Jina embeddings ──────────────────────────────────────────────────────────
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=60) as client:
@@ -280,7 +280,15 @@ _JUNK_LINE = re.compile(
     r'Issue\s+\d|Jan[-\s]June|available\s+at)',
     re.IGNORECASE
 )
-
+async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
+    path = f"{org_id}/{filename}"
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{BASE}/storage/v1/object/documents/{path}",
+            headers={**HEADERS, "Content-Type": "application/octet-stream"},
+            content=file_bytes,
+        )
+    return f"{BASE}/storage/v1/object/public/documents/{path}"
 def strip_references(text: str) -> str:
     match = _REF_HEADER.search(text)
     if match:
