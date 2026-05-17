@@ -337,11 +337,19 @@ def semantic_chunks(text: str) -> list[dict]:
 
 
 def clean(text: str) -> str:
-    text = strip_references(text)          # drop bibliography section
-    text = re.sub(r'-\n', '', text)        # fix PDF hyphenation
-    text = re.sub(r'\n', ' ', text)        # flatten newlines
-    text = re.sub(r'\s+', ' ', text)       # normalize spaces
-    text = re.sub(r'[^\x00-\x7F]+', '', text)
+    # Fix PDF word-boundary issues first
+    # Insert space before uppercase letters that follow lowercase (camelCase boundary from bad PDF extraction)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Fix hyphenated line breaks
+    text = re.sub(r'-\n', '', text)
+    # Replace newlines with spaces
+    text = re.sub(r'\n+', ' ', text)
+    # Fix missing spaces after punctuation
+    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
+    # Fix missing spaces after closing parens/brackets
+    text = re.sub(r'([)\]])([A-Za-z])', r'\1 \2', text)
+    # Normalize multiple spaces
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 

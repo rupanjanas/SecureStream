@@ -2,6 +2,7 @@ import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { uploadDocument } from "../api/aiService";
+import { storeFile } from "../utils/fileStore";
 
 export default function UploadPage({ user }) {
   const [dragging, setDragging] = useState(false);
@@ -37,8 +38,6 @@ export default function UploadPage({ user }) {
   setError(null);
   try {
     const isPDF = file.type === "application/pdf";
-
-    // Read text for TXT, create object URL for PDF
     let docText = "";
 
     if (!isPDF) {
@@ -55,16 +54,18 @@ export default function UploadPage({ user }) {
     setStatus("done");
 
     setTimeout(() => {
+      if (isPDF) storeFile(file);  // ← store before navigate
       navigate("/doc-viewer", {
-      state: {
-      docName: file.name,
-      docText,
-      file   // 🔥 PASS FILE DIRECTLY
-    }
-  });
+        state: {
+          docName:       file.name,
+          docText,
+          fromDashboard: false
+          // No file/fileUrl in state — PDF comes from fileStore
+        }
+      });
     }, 1200);
   } catch (err) {
-    setError(err.message || "Upload failed. Is the AI service running on port 8000?");
+    setError(err.message || "Upload failed.");
     setStatus("error");
   }
 };

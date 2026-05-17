@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
+import { retrieveFile } from "../utils/fileStore";
 import {
   getAnnotations,
   createAnnotation,
@@ -101,11 +102,29 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const isOrg         = mode === "org";
 
   // ── PDF — same working approach as your original ──
-  const isPDF  = docName.toLowerCase().endsWith(".pdf");
-  const pdfFile = useMemo(() => {
-    if (!fileUrl) return null;
-    return { url: fileUrl, withCredentials: false };
-  }, [fileUrl]);
+  const pdfUrlRef = useRef(null);
+  const pdfFile   = useMemo(() => {
+  if (!isPDF) return null;
+  if (pdfUrlRef.current) return { url: pdfUrlRef.current };
+  // Try location.state first, then module store
+  const fromState = location.state?.file;
+  const fileObj   = fromState instanceof File ? fromState : retrieveFile();
+  if (!fileObj) return null;
+  const url = URL.createObjectURL(fileObj);
+  pdfUrlRef.current = url;
+  return { url };
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, []); // empty deps — create blob URL once only
+
+// Add cleanup effect (after existing useEffects):
+useEffect(() => {
+  return () => {
+    if (pdfUrlRef.current) {
+      URL.revokeObjectURL(pdfUrlRef.current);
+      pdfUrlRef.current = null;
+    }
+  };
+}, []);
 
   // ── State ──
   const [numPages, setNumPages]                 = useState(null);
@@ -674,13 +693,15 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     </svg>
                   </div>
                 )}
-                <div className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] ${
-                  msg.role === "user"
-                    ? isOrg
-                      ? "bg-emerald-600 text-white rounded-tr-sm"
-                      : "bg-[#185FA5] text-white rounded-tr-sm"
-                    : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
-                }`}>
+                <div className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] break-words overflow-wrap-anywhere ${
+                msg.role === "user"
+                ? isOrg
+                ? "bg-emerald-600 text-white rounded-tr-sm"
+                : "bg-[#185FA5] text-white rounded-tr-sm"
+                : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
+              }`}
+              style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
+              >
                   {msg.content}
                   {msg.streaming && (
                     <span className="inline-block w-1 h-3 bg-gray-400 ml-0.5 animate-pulse rounded"/>
