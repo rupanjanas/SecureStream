@@ -102,6 +102,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const isOrg         = mode === "org";
 
   // ── PDF — same working approach as your original ──
+  const isPDF = docName.toLowerCase().endsWith(".pdf");
   const pdfUrlRef = useRef(null);
   const pdfFile   = useMemo(() => {
   if (!isPDF) return null;
