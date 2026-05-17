@@ -337,18 +337,12 @@ def semantic_chunks(text: str) -> list[dict]:
 
 
 def clean(text: str) -> str:
-    # Fix PDF word-boundary issues first
-    # Insert space before uppercase letters that follow lowercase (camelCase boundary from bad PDF extraction)
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-    # Fix hyphenated line breaks
+    # REMOVE THIS LINE — it breaks normal words:
+    # text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
     text = re.sub(r'-\n', '', text)
-    # Replace newlines with spaces
     text = re.sub(r'\n+', ' ', text)
-    # Fix missing spaces after punctuation
     text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
-    # Fix missing spaces after closing parens/brackets
     text = re.sub(r'([)\]])([A-Za-z])', r'\1 \2', text)
-    # Normalize multiple spaces
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -414,13 +408,18 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
         # ── PDF extraction via pymupdf (fixes word-spacing bug) ──
         if suffix == ".pdf":
             doc = fitz.open(tmp_path)
-            pages = [page.get_text("text") for page in doc]
-            doc.close()
-            raw_text = "\n\n".join(pages)
-        else:
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
-
+            pages = []
+            for page in doc:
+                blocks = page.get_text("blocks")
+        # sort top-to-bottom, left-to-right, then join with spaces
+                block_texts = [
+                    b[4].strip()
+                    for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
+                    if b[4].strip()
+                ]
+            pages.append("\n\n".join(block_texts))
+        doc.close()
+        raw_text = "\n\n".join(pages)
         full_text = clean(raw_text)
 
         if not full_text:
