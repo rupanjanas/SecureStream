@@ -4,37 +4,29 @@ import Navbar from "../components/Navbar";
 import { getHealth, listDocuments, getSession } from "../api/aiService";
 
 export default function Dashboard({ user, orgId, orgName, mode }) {
-  const navigate          = useNavigate();
-  const [health, setHealth]   = useState(null);
-  const [docs, setDocs]       = useState([]);
+  const navigate = useNavigate();
+  const [health, setHealth] = useState(null);
+  const [docs, setDocs] = useState([]);
   const [docsLoading, setDocsLoading] = useState(true);
 
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth({ status: "error" }));
   }, []);
 
-  useEffect(() => {
-  async function loadDocs() {
+  const loadDocs = useCallback(async () => {
+    setDocsLoading(true);
+    setDocs([]); // ← Clear immediately so stale workspace docs don't flash
     try {
       const session = await getSession();
-
-      if (!session?.access_token) {
-        setDocs([]);
-        return;
-      }
-
-      const data = await listDocuments(session.access_token);
-
+      if (!session?.access_token) return;
+      const data = await listDocuments(session.access_token, orgId); // ← Pass orgId
       setDocs(data.documents || []);
     } catch {
       setDocs([]);
     } finally {
       setDocsLoading(false);
     }
-  }
-
-  loadDocs();
-}, [orgId]);
+  }, [orgId]); // ← Reacts to orgId changes
 
   const aiOnline = health?.status === "ok";
   const dbOnline = health?.db === "connected";
