@@ -38,7 +38,7 @@ function Message({ msg }) {
   );
 }
 
-export default function ChatPage({ user }) {
+export default function ChatPage({ user,orgId, mode }) {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
@@ -63,15 +63,15 @@ export default function ChatPage({ user }) {
     setInput("");
     setLoading(true);
     try {
-      const data = await askQuestionStream(question);
-      setMessages((m) => [...m, {
-        role: "assistant",
-        content: data.answer,
-      }]);
+      const session = await getSession();
+      if (!session?.access_token) throw new Error("Not authenticated");
+
+      const data = await askQuestionStream(question, session.access_token, orgId); // ← pass orgId
+      setMessages((m) => [...m, { role: "assistant", content: data.answer }]);
     } catch (err) {
       setMessages((m) => [...m, {
         role: "assistant",
-        content: `Something went wrong: ${err.message}. Make sure the AI service is running on port 8000 and Ollama is serving on port 11434.`,
+        content: `Something went wrong: ${err.message}`,
         sources: []
       }]);
     } finally {

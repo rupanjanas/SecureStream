@@ -4,7 +4,7 @@ import Navbar from "../components/Navbar";
 import { uploadDocument } from "../api/aiService";
 import { storeFile } from "../utils/filestore";
 
-export default function UploadPage({ user }) {
+export default function UploadPage({ user, orgId, mode }) {
   const [dragging, setDragging] = useState(false);
   const [file, setFile]         = useState(null);
   const [status, setStatus]     = useState(null);
@@ -12,7 +12,6 @@ export default function UploadPage({ user }) {
   const [error, setError]       = useState(null);
   const inputRef                = useRef(null);
   const navigate                = useNavigate();
-  const token                   = "dev-token";
 
   const handleFile = (f) => {
     if (!f) return;
@@ -33,42 +32,43 @@ export default function UploadPage({ user }) {
   };
 
  const handleUpload = async () => {
-  if (!file) return;
-  setStatus("uploading");
-  setError(null);
-  try {
-    const isPDF = file.type === "application/pdf";
-    let docText = "";
+    if (!file) return;
+    setStatus("uploading");
+    setError(null);
+    try {
+      const session = await getSession();
+      if (!session?.access_token) {
+        setError("Not authenticated.");
+        setStatus("error");
+        return;
+      }
 
-    if (!isPDF) {
-      docText = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = (e) => resolve(e.target.result);
-        reader.onerror = reject;
-        reader.readAsText(file);
-      });
+      const isPDF = file.type === "application/pdf";
+      let docText = "";
+      if (!isPDF) {
+        docText = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = (e) => resolve(e.target.result);
+          reader.onerror = reject;
+          reader.readAsText(file);
+        });
+      }
+
+      const data = await uploadDocument(file, session.access_token); // ← real token
+      setResult(data);
+      setStatus("done");
+
+      setTimeout(() => {
+        if (isPDF) storeFile(file);
+        navigate("/doc-viewer", {
+          state: { docName: file.name, docText, fromDashboard: false }
+        });
+      }, 1200);
+    } catch (err) {
+      setError(err.message || "Upload failed.");
+      setStatus("error");
     }
-
-    const data = await uploadDocument(file, token);
-    setResult(data);
-    setStatus("done");
-
-    setTimeout(() => {
-      if (isPDF) storeFile(file);  // ← store before navigate
-      navigate("/doc-viewer", {
-        state: {
-          docName:       file.name,
-          docText,
-          fromDashboard: false
-          // No file/fileUrl in state — PDF comes from fileStore
-        }
-      });
-    }, 1200);
-  } catch (err) {
-    setError(err.message || "Upload failed.");
-    setStatus("error");
-  }
-};
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">

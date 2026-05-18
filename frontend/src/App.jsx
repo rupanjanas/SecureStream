@@ -60,10 +60,14 @@ export default function App() {
         <Route path="/onboarding"       element={<OnboardingPage />} />
         <Route path="/org-setup"        element={<OrgSetupPage />} />
         <Route path="/workspace-select" element={
-          <ProtectedRoute user={user}>
-            <WorkspaceSelectPage />
-          </ProtectedRoute>
-        }/>
+  <ProtectedRoute user={user}>
+    <WorkspaceSelectPage
+      setMode={setMode}
+      setOrgId={setOrgId}
+      setOrgName={setOrgName}
+    />
+  </ProtectedRoute>
+}/>
         <Route path="/dashboard" element={
           <ProtectedRoute user={user}>
             <Dashboard user={user} orgId={orgId} orgName={orgName} mode={mode} />
@@ -71,12 +75,12 @@ export default function App() {
         }/>
         <Route path="/upload" element={
           <ProtectedRoute user={user}>
-            <UploadPage user={user} />
+            <UploadPage user={user} orgId={orgId} mode={mode} />
           </ProtectedRoute>
         }/>
         <Route path="/chat" element={
           <ProtectedRoute user={user}>
-            <ChatPage user={user} />
+            <ChatPage user={user} orgId={orgId} mode={mode} />
           </ProtectedRoute>
         }/>
         <Route path="/doc-viewer" element={

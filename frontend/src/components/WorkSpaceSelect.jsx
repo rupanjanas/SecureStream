@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { getMemberships, selectWorkspace } from "../api/orgService";
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
-export default function WorkspaceSelectPage() {
+export default function WorkspaceSelectPage({ setMode, setOrgId, setOrgName }) {
   const [memberships, setMemberships] = useState([]);
   const [loading, setLoading]         = useState(true);
   const [selecting, setSelecting]     = useState(null);
@@ -17,11 +17,25 @@ export default function WorkspaceSelectPage() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
-
+  const uniqueMemberships = Object.values(
+  memberships.reduce((acc, m) => {
+    if (!acc[m.org_id] || m.role === "admin") acc[m.org_id] = m;
+    return acc;
+  }, {})
+);
   const handleSelect = async (mode, orgId = null) => {
     setSelecting(orgId || mode);
     try {
       await selectWorkspace(mode, orgId);
+
+      // ✅ Update parent state immediately — Dashboard gets fresh props instantly
+      setMode(mode);
+      setOrgId(orgId);
+
+      // Set orgName from the membership list if it's an org
+      const match = uniqueMemberships.find((m) => m.org_id === orgId);
+      setOrgName(match?.orgs?.name || null);
+
       navigate("/dashboard");
     } catch (err) {
       console.error(err);
@@ -109,10 +123,10 @@ export default function WorkspaceSelectPage() {
           </button>
 
           {/* Existing org memberships */}
-          {memberships.length > 0 && (
+          {uniqueMemberships.length > 0 && (
             <>
               <p className="text-xs text-gray-400 px-1 mt-1">Your organisations</p>
-              {memberships.map((m) => (
+              {uniqueMemberships.map((m) => (
                 <button
                   key={m.org_id}
                   onClick={() => handleSelect("org", m.org_id)}
