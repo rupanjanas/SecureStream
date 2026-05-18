@@ -59,7 +59,7 @@ export default function UploadPage({ user, orgId, mode }) {
       setStatus("done");
 
       setTimeout(() => {
-        if (isPDF) storeFile(file);
+        if (isPDF) await storeFile(file);
         navigate("/doc-viewer", {
           state: { docName: file.name, docText, fromDashboard: false }
         });

@@ -19,7 +19,6 @@ import { askQuestionStream, getDocumentText } from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
-const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
@@ -94,39 +93,67 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
 }
 
 export default function DocViewerPage({ user, mode, orgName }) {
-  const location      = useLocation();
-  const navigate      = useNavigate();
-  const docName       = location.state?.docName || "Document";
-  const docText       = location.state?.docText || "";
-  const fileUrl       = location.state?.fileUrl || null;
-  const isOrg         = mode === "org";
-const pageRefs = useRef({});       // stores ref per page
-const [highlightedPages, setHighlightedPages] = useState({}); // { pageNum: [phrases] }
-  // ── PDF — same working approach as your original ──
-  const isPDF = docName.toLowerCase().endsWith(".pdf");
-  const pdfUrlRef = useRef(null);
-  const pdfFile   = useMemo(() => {
-  if (!isPDF) return null;
-  if (pdfUrlRef.current) return { url: pdfUrlRef.current };
-  // Try location.state first, then module store
-  const fromState = location.state?.file;
-  const fileObj   = fromState instanceof File ? fromState : retrieveFile();
-  if (!fileObj) return null;
-  const url = URL.createObjectURL(fileObj);
-  pdfUrlRef.current = url;
-  return { url };
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, []); // empty deps — create blob URL once only
+  const location  = useLocation();
+  const navigate  = useNavigate();
+  const docName   = location.state?.docName || "Document";
+  const docText   = location.state?.docText || "";
+  const isOrg     = mode === "org";
+  const isPDF     = docName.toLowerCase().endsWith(".pdf");
 
-// Add cleanup effect (after existing useEffects):
-useEffect(() => {
-  return () => {
-    if (pdfUrlRef.current) {
-      URL.revokeObjectURL(pdfUrlRef.current);
-      pdfUrlRef.current = null;
+  // ── Refs ──
+  const pageRefs  = useRef({});
+  const pdfUrlRef = useRef(null);
+  const bottomRef = useRef(null);
+  const tokenRef  = useRef(null);
+
+  // ── PDF blob URL — created once ──
+  const pdfFile = useMemo(() => {
+    if (!isPDF) return null;
+    if (pdfUrlRef.current) return { url: pdfUrlRef.current };
+    const fromState = location.state?.file;
+    const fileObj   = fromState instanceof File ? fromState : retrieveFile();
+    if (!fileObj) return null;
+    const url = URL.createObjectURL(fileObj);
+    pdfUrlRef.current = url;
+    return { url };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Cleanup blob URL on unmount ──
+  useEffect(() => {
+    return () => {
+      if (pdfUrlRef.current) {
+        URL.revokeObjectURL(pdfUrlRef.current);
+        pdfUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  // ── Chat persistence ──
+  const CHAT_KEY = `chat_${docName}`;
+
+  const [messages, setMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem(CHAT_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
     }
-  };
-}, []);
+  });
+
+  // Clear stuck streaming messages on mount
+  useEffect(() => {
+    setMessages((m) => m.filter((msg) => !msg.streaming && msg.content));
+  }, []);
+
+  // Persist settled messages
+  useEffect(() => {
+    const settled = messages.filter((m) => !m.streaming && m.content);
+    if (settled.length === 0) return;
+    try {
+      localStorage.setItem(CHAT_KEY, JSON.stringify(settled));
+    } catch { /* storage full */ }
+  }, [messages, CHAT_KEY]);
 
   // ── State ──
   const [numPages, setNumPages]                 = useState(null);
@@ -134,6 +161,7 @@ useEffect(() => {
   const [input, setInput]                       = useState("");
   const [loading, setLoading]                   = useState(false);
   const [highlights, setHighlights]             = useState([]);
+  const [highlightedPages, setHighlightedPages] = useState({});
   const [sourcePassages, setSourcePassages]     = useState([]);
   const [annotations, setAnnotations]           = useState([]);
   const [activeAnnotation, setActiveAnnotation] = useState(null);
@@ -145,28 +173,8 @@ useEffect(() => {
   const [sharingId, setSharingId]               = useState(null);
   const [members, setMembers]                   = useState([]);
   const [onlineSet, setOnlineSet]               = useState(new Set());
-  const bottomRef = useRef(null);
-  const tokenRef  = useRef(null);
+
   const userEmail = user?.email || "dev@securestream.local";
-  // With this:
-const CHAT_KEY = `chat_${docName}`;
-
-const [messages, setMessages] = useState(() => {
-  try {
-    const saved = localStorage.getItem(CHAT_KEY);
-    return saved ? JSON.parse(saved) : [];
-  } catch {
-    return [];
-  }
-});
-
-useEffect(() => {
-  if (messages.length === 0) return;
-  const settled = messages.filter((m) => !m.streaming);
-  try {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(settled));
-  } catch { /* storage full — silent */ }
-}, [messages, CHAT_KEY]);
 
   // ── Fetch token once ──
   useEffect(() => {
@@ -176,7 +184,7 @@ useEffect(() => {
       .catch(() => { tokenRef.current = "dev-token"; });
   }, []);
 
-  // ── Load document text from backend ──
+  // ── Load document text ──
   useEffect(() => {
     if (!docName) return;
     const t = setTimeout(async () => {
@@ -199,15 +207,12 @@ useEffect(() => {
     return () => clearTimeout(t);
   }, [docName]);
 
-  // ── Org: load members + online status ──
+  // ── Org: members + online ──
   useEffect(() => {
     if (!isOrg) return;
     const fetchAll = async () => {
       try {
-        const [mData, oData] = await Promise.all([
-          getOrgMembers(),
-          getOnlineMembers()
-        ]);
+        const [mData, oData] = await Promise.all([getOrgMembers(), getOnlineMembers()]);
         setMembers(mData.members || []);
         setOnlineSet(new Set((oData.online || []).map((o) => o.user_sub)));
       } catch { /* silent */ }
@@ -230,6 +235,7 @@ useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // ── Handlers ──
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
@@ -264,9 +270,7 @@ useEffect(() => {
   const handleToggleShare = async (ann) => {
     setSharingId(ann.id);
     try {
-      const updated = await toggleShareAnnotation(
-        ann.id, !ann.is_shared, tokenRef.current || "dev-token"
-      );
+      const updated = await toggleShareAnnotation(ann.id, !ann.is_shared, tokenRef.current || "dev-token");
       setAnnotations((prev) =>
         prev.map((a) => a.id === ann.id ? { ...a, is_shared: updated.is_shared } : a)
       );
@@ -280,91 +284,87 @@ useEffect(() => {
   };
 
   const send = async () => {
-  const question = input.trim();
-  if (!question || loading) return;
+    const question = input.trim();
+    if (!question || loading) return;
 
-  setMessages((m) => [...m, { role: "user", content: question }]);
-  setInput("");
-  setLoading(true);
-  setHighlights([]);
-  setSourcePassages([]);
-  setHighlightedPages({});  // ← clear old highlights
-  setMessages((m) => {
-    if (m.length && m[m.length - 1].streaming) return m;
-    return [...m, { role: "assistant", content: "", streaming: true }];
-  });
+    // Add user message, clear any stuck streaming message, add fresh assistant placeholder
+    setMessages((m) => [
+      ...m.filter((msg) => !msg.streaming),
+      { role: "user", content: question },
+      { role: "assistant", content: "", streaming: true }
+    ]);
+    setInput("");
+    setLoading(true);
+    setHighlights([]);
+    setSourcePassages([]);
+    setHighlightedPages({});
 
-  try {
-    await askQuestionStream(
-      question,
-      (token) => {
-        setMessages((m) => {
-          const updated = [...m];
-          const last    = updated[updated.length - 1];
-          updated[updated.length - 1] = { ...last, content: last.content + token };
-          return updated;
-        });
-      },
-      (sources, passages) => {
-        setMessages((m) => {
-          const updated = [...m];
-          updated[updated.length - 1] = {
-            ...updated[updated.length - 1],
-            streaming: false,
-            sources
-          };
-          return updated;
-        });
-
-        const phrases = [...new Set(
-          (passages || [])
-            .sort((a, b) => b.similarity - a.similarity)
-            .map((p) => p.passage.slice(0, 120))
-        )];
-        setHighlights(phrases);
-        setSourcePassages(passages || []);
-
-        // ── PDF scroll + highlight ──
-        if (isPDF && passages?.length > 0) {
-          const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
-
-          // Build per-page highlight map
-          const pageHighlights = {};
-          sorted.forEach((p) => {
-            const pg = p.page_number || 1;
-            if (!pageHighlights[pg]) pageHighlights[pg] = [];
-            pageHighlights[pg].push(p.passage.slice(0, 120));
+    try {
+      await askQuestionStream(
+        question,
+        (token) => {
+          setMessages((m) => {
+            const updated = [...m];
+            const last    = updated[updated.length - 1];
+            updated[updated.length - 1] = { ...last, content: last.content + token };
+            return updated;
           });
-          setHighlightedPages(pageHighlights);
+        },
+        (sources, passages) => {
+          setMessages((m) => {
+            const updated = [...m];
+            updated[updated.length - 1] = {
+              ...updated[updated.length - 1],
+              streaming: false,
+              sources
+            };
+            return updated;
+          });
 
-          // Scroll to best matching page
-          const targetPage = sorted[0].page_number || 1;
-          setTimeout(() => {
-            const pageEl = pageRefs.current[targetPage];
-            if (pageEl) {
-              pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
-            }
-          }, 400);
-        }
+          const phrases = [...new Set(
+            (passages || [])
+              .sort((a, b) => b.similarity - a.similarity)
+              .map((p) => p.passage.slice(0, 120))
+          )];
+          setHighlights(phrases);
+          setSourcePassages(passages || []);
 
-        setLoading(false);
-      },
-      3,
-      docName
-    );
-  } catch (err) {
-    setMessages((m) => {
-      const updated = [...m];
-      updated[updated.length - 1] = {
-        ...updated[updated.length - 1],
-        content:   `Error: ${err.message}`,
-        streaming: false
-      };
-      return updated;
-    });
-    setLoading(false);
-  }
-};
+          // ── PDF scroll + highlight ──
+          if (isPDF && passages?.length > 0) {
+            const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
+            const pageHighlights = {};
+            sorted.forEach((p) => {
+              const pg = p.page_number || 1;
+              if (!pageHighlights[pg]) pageHighlights[pg] = [];
+              pageHighlights[pg].push(p.passage.slice(0, 120));
+            });
+            setHighlightedPages(pageHighlights);
+
+            const targetPage = sorted[0].page_number || 1;
+            setTimeout(() => {
+              const pageEl = pageRefs.current[targetPage];
+              if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+            }, 400);
+          }
+
+          setLoading(false);
+        },
+        3,
+        docName
+      );
+    } catch (err) {
+      setMessages((m) => {
+        const updated = [...m];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content:   `Error: ${err.message}`,
+          streaming: false
+        };
+        return updated;
+      });
+      setLoading(false);
+    }
+  };
 
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
@@ -387,17 +387,14 @@ useEffect(() => {
 
           {/* Toolbar */}
           <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
-             isOrg? "bg-linear-to-r from-emerald-50 to-teal-50 border-emerald-200": "bg-white border-gray-100"
+            isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center gap-3 min-w-0">
-              <button
-                onClick={() => navigate("/dashboard")}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
-              >
+              <button onClick={() => navigate("/dashboard")}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0">
                 ← Dashboard
               </button>
               <span className="text-gray-200">|</span>
-
               {isOrg && (
                 <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-1">
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
@@ -410,7 +407,6 @@ useEffect(() => {
                   {orgName}
                 </span>
               )}
-
               <span className="text-sm font-medium text-gray-700 truncate">{docName}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
                 isPDF ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"
@@ -428,17 +424,12 @@ useEffect(() => {
               {isPDF && highlights.length > 0 && (
                 <span className="text-xs text-yellow-600">See sources →</span>
               )}
-
               <span className="text-xs text-gray-400">
                 {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
               </span>
-
-              {/* Member avatars — org only */}
               {isOrg && members.length > 0 && (
                 <div className="flex items-center gap-2 pl-3 border-l border-emerald-200">
-                  <span className="text-xs text-emerald-600 font-medium">
-                    {onlineCount} online
-                  </span>
+                  <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
                   <div className="flex -space-x-1.5">
                     {members.slice(0, 5).map((m) => (
                       <MemberAvatar
@@ -462,15 +453,11 @@ useEffect(() => {
           {/* Shared annotations bar */}
           {sharedAnnotations.length > 0 && (
             <div className="px-5 py-2 border-b border-gray-100 bg-blue-50 flex items-center gap-2 flex-shrink-0 overflow-x-auto">
-              <span className="text-xs text-blue-600 font-medium flex-shrink-0">
-                Shared by team:
-              </span>
+              <span className="text-xs text-blue-600 font-medium flex-shrink-0">Shared by team:</span>
               {sharedAnnotations.map((ann) => (
                 <button
                   key={ann.id}
-                  onClick={() => setActiveAnnotation(
-                    activeAnnotation?.id === ann.id ? null : ann
-                  )}
+                  onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
                   style={{ borderColor: ann.color, backgroundColor: ann.color + "30" }}
                   className="text-xs border rounded-lg px-2 py-1 text-gray-700 hover:opacity-80 transition-opacity flex-shrink-0"
                 >
@@ -487,10 +474,8 @@ useEffect(() => {
           >
             {/* Active annotation */}
             {activeAnnotation && (
-              <div
-                style={{ borderLeftColor: activeAnnotation.color }}
-                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3"
-              >
+              <div style={{ borderLeftColor: activeAnnotation.color }}
+                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3">
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="text-xs text-gray-400 mb-0.5">
@@ -507,12 +492,8 @@ useEffect(() => {
                     </p>
                     <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
                   </div>
-                  <button
-                    onClick={() => setActiveAnnotation(null)}
-                    className="text-xs text-gray-400 hover:text-gray-600 ml-4 flex-shrink-0"
-                  >
-                    ✕
-                  </button>
+                  <button onClick={() => setActiveAnnotation(null)}
+                    className="text-xs text-gray-400 hover:text-gray-600 ml-4 flex-shrink-0">✕</button>
                 </div>
                 {activeAnnotation.user_email === userEmail && (
                   <button
@@ -534,68 +515,65 @@ useEffect(() => {
               </div>
             )}
 
-            {/* PDF renderer — same as your working original */}
+            {/* PDF renderer */}
             {isPDF ? (
-  <div className="flex justify-center py-4 px-4" >
-    {pdfFile ? (
-      <Document
-        file={pdfFile}
-        onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-        onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}
-      >
-        {Array.from({ length: numPages || 1 }, (_, i) => {
-          const pageNum = i + 1;
-          return (
-            <div
-              key={pageNum}
-              ref={(el) => { pageRefs.current[pageNum] = el; }}
-              className="relative mb-4"
-            >
-              <Page
-                pageNumber={pageNum}
-                width={Math.min(600, window.innerWidth - 60)}
-                className="border border-gray-100 rounded-lg overflow-hidden"
-                onRenderSuccess={() => {
-                  // After page renders, apply text layer highlights
-                  if (!highlightedPages[pageNum]?.length) return;
-                  const pageEl = pageRefs.current[pageNum];
-                  if (!pageEl) return;
-                  const spans = pageEl.querySelectorAll(
-                    ".react-pdf__Page__textContent span"
-                  );
-                  spans.forEach((span) => {
-                    const text = span.textContent.toLowerCase();
-                    const matched = highlightedPages[pageNum].some((phrase) =>
-                      text.includes(phrase.toLowerCase().slice(0, 40))
-                    );
-                    if (matched) {
-                      span.style.backgroundColor = "rgba(254, 240, 138, 0.7)";
-                      span.style.borderRadius    = "2px";
-                    }
-                  });
-                }}
-              />
-            </div>
-          );
-        })}
-      </Document>
-    ) : (
-      <div className="flex flex-col items-center justify-center pt-20 text-center">
-        <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-            stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-        </div>
-        <p className="text-sm text-gray-500 mb-1">PDF preview not available</p>
-        <p className="text-xs text-gray-400">
-          Use the AI chat to ask questions about this document
-        </p>
-      </div>
-    )}
-  </div>
-) : ( /* TXT renderer stays exactly the same */ )}
+              <div className="flex justify-center py-4 px-4">
+                {pdfFile ? (
+                  <Document
+                    file={pdfFile}
+                    onLoadSuccess={({ numPages: n }) => setNumPages(n)}
+                    onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}
+                  >
+                    {Array.from({ length: numPages || 1 }, (_, i) => {
+                      const pageNum = i + 1;
+                      return (
+                        <div
+                          key={pageNum}
+                          ref={(el) => { pageRefs.current[pageNum] = el; }}
+                          className="relative mb-4"
+                        >
+                          <Page
+                            pageNumber={pageNum}
+                            width={Math.min(600, window.innerWidth - 60)}
+                            className="border border-gray-100 rounded-lg overflow-hidden"
+                            onRenderSuccess={() => {
+                              if (!highlightedPages[pageNum]?.length) return;
+                              const pageEl = pageRefs.current[pageNum];
+                              if (!pageEl) return;
+                              const spans = pageEl.querySelectorAll(
+                                ".react-pdf__Page__textContent span"
+                              );
+                              spans.forEach((span) => {
+                                const text = span.textContent.toLowerCase();
+                                const matched = highlightedPages[pageNum].some((phrase) =>
+                                  text.includes(phrase.toLowerCase().slice(0, 40))
+                                );
+                                if (matched) {
+                                  span.style.backgroundColor = "rgba(254, 240, 138, 0.7)";
+                                  span.style.borderRadius    = "2px";
+                                }
+                              });
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </Document>
+                ) : (
+                  <div className="flex flex-col items-center justify-center pt-20 text-center">
+                    <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                      </svg>
+                    </div>
+                    <p className="text-sm text-gray-500 mb-1">PDF preview not available</p>
+                    <p className="text-xs text-gray-400">Refresh the page or re-upload the document</p>
+                  </div>
+                )}
+              </div>
+            ) : (
               /* TXT renderer */
               <div className="px-8 py-6 max-w-prose mx-auto">
                 {displayText ? (
@@ -606,28 +584,22 @@ useEffect(() => {
                         {myAnnotations.map((ann) => (
                           <button
                             key={ann.id}
-                            onClick={() => setActiveAnnotation(
-                              activeAnnotation?.id === ann.id ? null : ann
-                            )}
+                            onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
                             style={{ borderColor: ann.color }}
                             className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5"
                           >
                             <span style={{ backgroundColor: ann.color }}
                               className="w-2 h-2 rounded-full inline-block"/>
                             "{ann.selected_text.slice(0, 25)}..."
-                            {ann.is_shared && (
-                              <span className="text-blue-400 ml-1">shared</span>
-                            )}
+                            {ann.is_shared && <span className="text-blue-400 ml-1">shared</span>}
                           </button>
                         ))}
                       </div>
                     )}
-
                     <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
                       {parts.map((part, i) =>
                         part.highlight ? (
-                          <mark key={i}
-                            style={{ backgroundColor: HIGHLIGHT_COLOR }}
+                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }}
                             className="rounded px-0.5 transition-all">
                             {part.text}
                           </mark>
@@ -663,20 +635,13 @@ useEffect(() => {
                     "{selectedText.slice(0, 50)}{selectedText.length > 50 ? "..." : ""}"
                   </span>
                 </p>
-                <button
-                  onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
-                  className="text-xs text-gray-400 hover:text-gray-600"
-                >
-                  Cancel
-                </button>
+                <button onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
+                  className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
               </div>
-
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-xs text-gray-400">Color:</span>
                 {ANNOTATION_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setNoteColor(c)}
+                  <button key={c} onClick={() => setNoteColor(c)}
                     style={{ backgroundColor: c }}
                     className={`w-5 h-5 rounded-full border-2 transition-transform ${
                       noteColor === c ? "border-gray-600 scale-110" : "border-transparent"
@@ -687,7 +652,6 @@ useEffect(() => {
                   {isOrg ? "Share with team anytime" : "Starts private · share anytime"}
                 </span>
               </div>
-
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -716,29 +680,26 @@ useEffect(() => {
             isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center justify-between">
-  <div>
-    <div className="flex items-center gap-2">
-      <p className="text-sm font-semibold text-gray-900">Ask AI</p>
-      <button
-        onClick={() => {
-          localStorage.removeItem(CHAT_KEY);
-          setMessages([]);
-        }}
-        className="text-xs text-gray-400 hover:text-red-400 transition-colors"
-      >
-        Clear
-      </button>
-    </div>
-    <p className="text-xs text-gray-400">
-      {isPDF ? "Searches embedded content" : "Highlights relevant passages"}
-    </p>
-  </div>
-  {isOrg && (
-    <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg font-medium">
-      Shared workspace
-    </span>
-  )}
-</div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-900">Ask AI</p>
+                  <button
+                    onClick={() => { localStorage.removeItem(CHAT_KEY); setMessages([]); }}
+                    className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400">
+                  {isPDF ? "Searches embedded content" : "Highlights relevant passages"}
+                </p>
+              </div>
+              {isOrg && (
+                <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg font-medium">
+                  Shared workspace
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Messages */}
@@ -778,15 +739,16 @@ useEffect(() => {
                     </svg>
                   </div>
                 )}
-                <div className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] break-words overflow-wrap-anywhere ${
-                msg.role === "user"
-                ? isOrg
-                ? "bg-emerald-600 text-white rounded-tr-sm"
-                : "bg-[#185FA5] text-white rounded-tr-sm"
-                : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
-              }`}
-              style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
-              >
+                <div
+                  className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] ${
+                    msg.role === "user"
+                      ? isOrg
+                        ? "bg-emerald-600 text-white rounded-tr-sm"
+                        : "bg-[#185FA5] text-white rounded-tr-sm"
+                      : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
+                  }`}
+                  style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
+                >
                   {msg.content}
                   {msg.streaming && (
                     <span className="inline-block w-1 h-3 bg-gray-400 ml-0.5 animate-pulse rounded"/>
@@ -806,10 +768,8 @@ useEffect(() => {
                 </div>
                 <div className="bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-3 py-2.5 flex gap-1">
                   {[0,150,300].map((d) => (
-                    <span key={d}
-                      className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"
-                      style={{ animationDelay: `${d}ms` }}
-                    />
+                    <span key={d} className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"
+                      style={{ animationDelay: `${d}ms` }}/>
                   ))}
                 </div>
               </div>
@@ -831,11 +791,13 @@ useEffect(() => {
                       if (!isPDF) {
                         const marks = document.querySelectorAll("mark");
                         if (marks[i]) marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
+                      } else {
+                        const targetPage = p.page_number || 1;
+                        const pageEl = pageRefs.current[targetPage];
+                        if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
                       }
                     }}
-                    className={`bg-white border border-yellow-200 rounded-lg px-3 py-2 transition-colors ${
-                      !isPDF ? "cursor-pointer hover:border-yellow-400" : ""
-                    }`}
+                    className="bg-white border border-yellow-200 rounded-lg px-3 py-2 transition-colors cursor-pointer hover:border-yellow-400"
                   >
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
@@ -846,6 +808,9 @@ useEffect(() => {
                     <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
                       {p.passage.slice(0, 120)}...
                     </p>
+                    {p.page_number && (
+                      <p className="text-xs text-gray-400 mt-1">Page {p.page_number}</p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -860,9 +825,7 @@ useEffect(() => {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
-                placeholder={isOrg
-                  ? "Ask about this shared document..."
-                  : "Ask about this document..."}
+                placeholder={isOrg ? "Ask about this shared document..." : "Ask about this document..."}
                 className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors ${accentFocus}`}
               />
               <button
