@@ -266,39 +266,6 @@ app.get('/login', checkClientReady, (req, res) => {
     });
 });
 
-// Select which org/mode to use
-app.post('/org/select', checkAuth, async (req, res) => {
-  const { orgId, mode } = req.body;
-  // mode: "personal" | "org"
-
-  if (mode === 'personal') {
-    req.session.orgId   = null;
-    req.session.orgName = null;
-    req.session.mode    = 'personal';
-    return req.session.save(() => res.json({ mode: 'personal' }));
-  }
-
-  if (mode === 'org' && orgId) {
-    // Verify user is actually a member
-    const { data } = await supabaseAdmin
-      .from('org_members')
-      .select('org_id, orgs(name)')
-      .eq('user_sub', req.session.userInfo.sub)
-      .eq('org_id', orgId)
-      .single();
-
-    if (!data) return res.status(403).json({ error: 'Not a member of this org' });
-
-    req.session.orgId   = data.org_id;
-    req.session.orgName = data.orgs?.name;
-    req.session.mode    = 'org';
-    return req.session.save(() =>
-      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs?.name })
-    );
-  }
-
-  res.status(400).json({ error: 'Invalid selection' });
-});
 // Replace your /callback route with this:
 app.get('/callback', checkClientReady, async (req, res) => {
   try {
