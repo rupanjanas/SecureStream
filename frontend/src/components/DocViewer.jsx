@@ -100,7 +100,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const docText       = location.state?.docText || "";
   const fileUrl       = location.state?.fileUrl || null;
   const isOrg         = mode === "org";
-
+const pageRefs = useRef({});       // stores ref per page
+const [highlightedPages, setHighlightedPages] = useState({}); // { pageNum: [phrases] }
   // ── PDF — same working approach as your original ──
   const isPDF = docName.toLowerCase().endsWith(".pdf");
   const pdfUrlRef = useRef(null);
@@ -130,7 +131,6 @@ useEffect(() => {
   // ── State ──
   const [numPages, setNumPages]                 = useState(null);
   const [fetchedText, setFetchedText]           = useState("");
-  const [messages, setMessages]                 = useState([]);
   const [input, setInput]                       = useState("");
   const [loading, setLoading]                   = useState(false);
   const [highlights, setHighlights]             = useState([]);
@@ -148,6 +148,25 @@ useEffect(() => {
   const bottomRef = useRef(null);
   const tokenRef  = useRef(null);
   const userEmail = user?.email || "dev@securestream.local";
+  // With this:
+const CHAT_KEY = `chat_${docName}`;
+
+const [messages, setMessages] = useState(() => {
+  try {
+    const saved = localStorage.getItem(CHAT_KEY);
+    return saved ? JSON.parse(saved) : [];
+  } catch {
+    return [];
+  }
+});
+
+useEffect(() => {
+  if (messages.length === 0) return;
+  const settled = messages.filter((m) => !m.streaming);
+  try {
+    localStorage.setItem(CHAT_KEY, JSON.stringify(settled));
+  } catch { /* storage full — silent */ }
+}, [messages, CHAT_KEY]);
 
   // ── Fetch token once ──
   useEffect(() => {
@@ -261,64 +280,91 @@ useEffect(() => {
   };
 
   const send = async () => {
-    const question = input.trim();
-    if (!question || loading) return;
+  const question = input.trim();
+  if (!question || loading) return;
 
-    setMessages((m) => [...m, { role: "user", content: question }]);
-    setInput("");
-    setLoading(true);
-    setHighlights([]);
-    setSourcePassages([]);
-    setMessages((m) => {
-      if (m.length && m[m.length - 1].streaming) return m;
-      return [...m, { role: "assistant", content: "", streaming: true }];
-    });
+  setMessages((m) => [...m, { role: "user", content: question }]);
+  setInput("");
+  setLoading(true);
+  setHighlights([]);
+  setSourcePassages([]);
+  setHighlightedPages({});  // ← clear old highlights
+  setMessages((m) => {
+    if (m.length && m[m.length - 1].streaming) return m;
+    return [...m, { role: "assistant", content: "", streaming: true }];
+  });
 
-    try {
-      await askQuestionStream(
-        question,
-        tokenRef.current || "dev-token",
-        (token) => {
-          setMessages((m) => {
-            const updated = [...m];
-            const last    = updated[updated.length - 1];
-            updated[updated.length - 1] = { ...last, content: last.content + token };
-            return updated;
+  try {
+    await askQuestionStream(
+      question,
+      (token) => {
+        setMessages((m) => {
+          const updated = [...m];
+          const last    = updated[updated.length - 1];
+          updated[updated.length - 1] = { ...last, content: last.content + token };
+          return updated;
+        });
+      },
+      (sources, passages) => {
+        setMessages((m) => {
+          const updated = [...m];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            streaming: false,
+            sources
+          };
+          return updated;
+        });
+
+        const phrases = [...new Set(
+          (passages || [])
+            .sort((a, b) => b.similarity - a.similarity)
+            .map((p) => p.passage.slice(0, 120))
+        )];
+        setHighlights(phrases);
+        setSourcePassages(passages || []);
+
+        // ── PDF scroll + highlight ──
+        if (isPDF && passages?.length > 0) {
+          const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
+
+          // Build per-page highlight map
+          const pageHighlights = {};
+          sorted.forEach((p) => {
+            const pg = p.page_number || 1;
+            if (!pageHighlights[pg]) pageHighlights[pg] = [];
+            pageHighlights[pg].push(p.passage.slice(0, 120));
           });
-        },
-        (sources, passages) => {
-          setMessages((m) => {
-            const updated = [...m];
-            updated[updated.length - 1] = {
-              ...updated[updated.length - 1],
-              streaming: false,
-              sources
-            };
-            return updated;
-          });
-          const phrases = [...new Set(
-            (passages || [])
-              .sort((a, b) => b.similarity - a.similarity)
-              .map((p) => p.passage.slice(0, 120))
-          )];
-          setHighlights(phrases);
-          setSourcePassages(passages || []);
-          setLoading(false);
+          setHighlightedPages(pageHighlights);
+
+          // Scroll to best matching page
+          const targetPage = sorted[0].page_number || 1;
+          setTimeout(() => {
+            const pageEl = pageRefs.current[targetPage];
+            if (pageEl) {
+              pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+          }, 400);
         }
-      );
-    } catch (err) {
-      setMessages((m) => {
-        const updated = [...m];
-        updated[updated.length - 1] = {
-          ...updated[updated.length - 1],
-          content:   `Error: ${err.message}`,
-          streaming: false
-        };
-        return updated;
-      });
-      setLoading(false);
-    }
-  };
+
+        setLoading(false);
+      },
+      3,
+      docName
+    );
+  } catch (err) {
+    setMessages((m) => {
+      const updated = [...m];
+      updated[updated.length - 1] = {
+        ...updated[updated.length - 1],
+        content:   `Error: ${err.message}`,
+        streaming: false
+      };
+      return updated;
+    });
+    setLoading(false);
+  }
+};
 
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
@@ -490,39 +536,66 @@ useEffect(() => {
 
             {/* PDF renderer — same as your working original */}
             {isPDF ? (
-              <div className="flex justify-center py-4 px-4">
-                {pdfFile ? (
-                  <Document
-                    file={pdfFile}
-                    onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-                    onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}
-                  >
-                    {Array.from({ length: numPages || 1 }, (_, i) => (
-                      <Page
-                        key={i + 1}
-                        pageNumber={i + 1}
-                        width={Math.min(600, window.innerWidth - 60)}
-                        className="mb-4 border border-gray-100 rounded-lg overflow-hidden"
-                      />
-                    ))}
-                  </Document>
-                ) : (
-                  <div className="flex flex-col items-center justify-center pt-20 text-center">
-                    <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-                        stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
-                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                      </svg>
-                    </div>
-                    <p className="text-sm text-gray-500 mb-1">PDF preview not available</p>
-                    <p className="text-xs text-gray-400">
-                      Use the AI chat to ask questions about this document
-                    </p>
-                  </div>
-                )}
-              </div>
-            ) : (
+  <div className="flex justify-center py-4 px-4" >
+    {pdfFile ? (
+      <Document
+        file={pdfFile}
+        onLoadSuccess={({ numPages: n }) => setNumPages(n)}
+        onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}
+      >
+        {Array.from({ length: numPages || 1 }, (_, i) => {
+          const pageNum = i + 1;
+          return (
+            <div
+              key={pageNum}
+              ref={(el) => { pageRefs.current[pageNum] = el; }}
+              className="relative mb-4"
+            >
+              <Page
+                pageNumber={pageNum}
+                width={Math.min(600, window.innerWidth - 60)}
+                className="border border-gray-100 rounded-lg overflow-hidden"
+                onRenderSuccess={() => {
+                  // After page renders, apply text layer highlights
+                  if (!highlightedPages[pageNum]?.length) return;
+                  const pageEl = pageRefs.current[pageNum];
+                  if (!pageEl) return;
+                  const spans = pageEl.querySelectorAll(
+                    ".react-pdf__Page__textContent span"
+                  );
+                  spans.forEach((span) => {
+                    const text = span.textContent.toLowerCase();
+                    const matched = highlightedPages[pageNum].some((phrase) =>
+                      text.includes(phrase.toLowerCase().slice(0, 40))
+                    );
+                    if (matched) {
+                      span.style.backgroundColor = "rgba(254, 240, 138, 0.7)";
+                      span.style.borderRadius    = "2px";
+                    }
+                  });
+                }}
+              />
+            </div>
+          );
+        })}
+      </Document>
+    ) : (
+      <div className="flex flex-col items-center justify-center pt-20 text-center">
+        <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+            stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <p className="text-sm text-gray-500 mb-1">PDF preview not available</p>
+        <p className="text-xs text-gray-400">
+          Use the AI chat to ask questions about this document
+        </p>
+      </div>
+    )}
+  </div>
+) : ( /* TXT renderer stays exactly the same */ )}
               /* TXT renderer */
               <div className="px-8 py-6 max-w-prose mx-auto">
                 {displayText ? (
@@ -643,18 +716,29 @@ useEffect(() => {
             isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-semibold text-gray-900">Ask AI</p>
-                <p className="text-xs text-gray-400">
-                  {isPDF ? "Searches embedded content" : "Highlights relevant passages"}
-                </p>
-              </div>
-              {isOrg && (
-                <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg font-medium">
-                  Shared workspace
-                </span>
-              )}
-            </div>
+  <div>
+    <div className="flex items-center gap-2">
+      <p className="text-sm font-semibold text-gray-900">Ask AI</p>
+      <button
+        onClick={() => {
+          localStorage.removeItem(CHAT_KEY);
+          setMessages([]);
+        }}
+        className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+      >
+        Clear
+      </button>
+    </div>
+    <p className="text-xs text-gray-400">
+      {isPDF ? "Searches embedded content" : "Highlights relevant passages"}
+    </p>
+  </div>
+  {isOrg && (
+    <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg font-medium">
+      Shared workspace
+    </span>
+  )}
+</div>
           </div>
 
           {/* Messages */}
