@@ -219,13 +219,14 @@ async def query_stream(
     prompt  = RAG_PROMPT.format(context=context, question=body.question)
 
     source_passages = [
-        {
-            "doc_name":   c["doc_name"],
-            "passage":    c["chunk_text"],
-            "similarity": round(c.get("similarity", 0), 3),
-            "section":    (c.get("metadata") or {}).get("section", "")
-        }
-        for c in combined
+    {
+        "doc_name":   c["doc_name"],
+        "passage":    c["chunk_text"],
+        "similarity": round(c.get("similarity", 0), 3),
+        "section":    (c.get("metadata") or {}).get("section", ""),
+        "page_number": (c.get("metadata") or {}).get("page_number", 1),  # ← add this
+    }
+    for c in combined
     ]
 
     async def stream_groq():

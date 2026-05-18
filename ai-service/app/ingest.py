@@ -365,13 +365,21 @@ def fingerprint(text: str) -> str:
 def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     result           = []
     current_section  = "Introduction"
+    current_page     = 1          # ← track current page
     section_idx      = 0
     chunk_in_section = 0
 
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
 
-        if is_junk_chunk(text):      # skip URL/citation-heavy chunks
+        # Extract page number if marker is present
+        page_match = re.match(r'^\[PAGE:(\d+)\]\s*', text)
+        if page_match:
+            current_page = int(page_match.group(1))
+            text = text[page_match.end():]   # strip the marker
+            chunk["text"] = text
+
+        if is_junk_chunk(text):
             continue
 
         is_header = (
@@ -397,7 +405,8 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
                 "section_index":       section_idx,
                 "position_in_section": chunk_in_section,
                 "doc_name":            doc_name,
-                "char_count":          len(text)
+                "char_count":          len(text),
+                "page_number":         current_page,   # ← now stored
             }
         })
 
@@ -414,20 +423,22 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
 
     try:
         # ── PDF extraction via pymupdf (fixes word-spacing bug) ──
-        if suffix == ".pdf":
-            doc = fitz.open(tmp_path)
-            pages = []
-            for page in doc:
-                blocks = page.get_text("blocks")
-        # sort top-to-bottom, left-to-right, then join with spaces
-                block_texts = [
-                    b[4].strip()
-                    for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
-                    if b[4].strip()
-                ]
-            pages.append("\n\n".join(block_texts))
+        # In ingest_document, pass page number into chunks
+    if suffix == ".pdf":
+        doc = fitz.open(tmp_path)
+        pages = []
+        for page_num, page in enumerate(doc, start=1):  # ← track page number
+            blocks = page.get_text("blocks")
+            block_texts = [
+                b[4].strip()
+                for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
+                if b[4].strip()
+            ]
+            pages.append((page_num, "\n\n".join(block_texts)))  # ← store as tuple
         doc.close()
-        raw_text = "\n\n".join(pages)
+        raw_text = "\n\n".join(
+            f"[PAGE:{pn}]\n{text}" for pn, text in pages if text
+        )
         full_text = clean(raw_text)
 
         if not full_text:
