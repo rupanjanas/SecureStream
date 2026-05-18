@@ -240,15 +240,18 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
 
     return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
     
-from langchain.prompts import PromptTemplate  # keep existing imports
+from langchain.prompts import PromptTemplate
 from app.config import settings
 from app.db import db_rpc, db_insert
 from app.cache import get_cached, set_cached
 import tempfile, os, re, hashlib
 import httpx
-import fitz  # NEW: replaces PyPDFLoader
+import fitz
 from app.db import HEADERS, BASE
+
+
 # ── Jina embeddings ──────────────────────────────────────────────────────────
+
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -269,6 +272,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 # ── Reference/junk filtering ──────────────────────────────────────────────────
+
 _REF_HEADER = re.compile(
     r'^\s*(references?|bibliography|works\s+cited|sources?|citations?|'
     r'further\s+reading|footnotes?|endnotes?|notes?)\s*$',
@@ -280,6 +284,8 @@ _JUNK_LINE = re.compile(
     r'Issue\s+\d|Jan[-\s]June|available\s+at)',
     re.IGNORECASE
 )
+
+
 async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
     path = f"{org_id}/{filename}"
     async with httpx.AsyncClient() as client:
@@ -289,11 +295,14 @@ async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> st
             content=file_bytes,
         )
     return f"{BASE}/storage/v1/object/public/documents/{path}"
+
+
 def strip_references(text: str) -> str:
     match = _REF_HEADER.search(text)
     if match:
         text = text[:match.start()]
     return text.strip()
+
 
 def is_junk_chunk(text: str) -> bool:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -304,6 +313,7 @@ def is_junk_chunk(text: str) -> bool:
 
 
 # ── Semantic chunking ─────────────────────────────────────────────────────────
+
 def semantic_chunks(text: str) -> list[dict]:
     MAX_CHARS = 800
     MIN_CHARS = 80
@@ -345,8 +355,6 @@ def semantic_chunks(text: str) -> list[dict]:
 
 
 def clean(text: str) -> str:
-    # REMOVE THIS LINE — it breaks normal words:
-    # text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
     text = re.sub(r'-\n', '', text)
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
@@ -362,22 +370,26 @@ def fingerprint(text: str) -> str:
 
 
 # ── Hierarchical metadata ─────────────────────────────────────────────────────
+
 def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     result           = []
     current_section  = "Introduction"
-    current_page     = 1          # ← track current page
+    current_page     = 1
     section_idx      = 0
     chunk_in_section = 0
 
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
 
-        # Extract page number if marker is present
+        # Extract page number from marker injected during PDF extraction
         page_match = re.match(r'^\[PAGE:(\d+)\]\s*', text)
         if page_match:
             current_page = int(page_match.group(1))
-            text = text[page_match.end():]   # strip the marker
+            text = text[page_match.end():].strip()
             chunk["text"] = text
+
+        if not text:
+            continue
 
         if is_junk_chunk(text):
             continue
@@ -406,7 +418,7 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
                 "position_in_section": chunk_in_section,
                 "doc_name":            doc_name,
                 "char_count":          len(text),
-                "page_number":         current_page,   # ← now stored
+                "page_number":         current_page,
             }
         })
 
@@ -414,6 +426,7 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
 
 
 # ── Main ingest function ──────────────────────────────────────────────────────
+
 async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain: str = "general") -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
 
@@ -422,23 +435,29 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
         tmp_path = tmp.name
 
     try:
-        # ── PDF extraction via pymupdf (fixes word-spacing bug) ──
-        # In ingest_document, pass page number into chunks
-    if suffix == ".pdf":
-        doc = fitz.open(tmp_path)
-        pages = []
-        for page_num, page in enumerate(doc, start=1):  # ← track page number
-            blocks = page.get_text("blocks")
-            block_texts = [
-                b[4].strip()
-                for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
-                if b[4].strip()
-            ]
-            pages.append((page_num, "\n\n".join(block_texts)))  # ← store as tuple
-        doc.close()
-        raw_text = "\n\n".join(
-            f"[PAGE:{pn}]\n{text}" for pn, text in pages if text
-        )
+        if suffix == ".pdf":
+            doc = fitz.open(tmp_path)
+            pages = []
+
+            for page_num, page in enumerate(doc, start=1):   # ← fixed: track every page
+                blocks = page.get_text("blocks")
+                block_texts = [
+                    b[4].strip()
+                    for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
+                    if b[4].strip()
+                ]
+                if block_texts:
+                    pages.append((page_num, "\n\n".join(block_texts)))  # ← fixed: append inside loop
+
+            doc.close()
+
+            # Join pages with markers so build_hierarchy can track page numbers
+            raw_text = "\n\n".join(
+                f"[PAGE:{pn}]\n{text}" for pn, text in pages
+            )
+        else:
+            raw_text = file_bytes.decode("utf-8", errors="ignore")
+
         full_text = clean(raw_text)
 
         if not full_text:

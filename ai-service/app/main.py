@@ -1,15 +1,3 @@
-"""
-main.py — FastAPI application
-─────────────────────────────
-All endpoints updated to use:
-  • hybrid_retrieve  (BM25 + embedding + RRF)
-  • rerank           (cross-encoder, graceful fallback)
-  • compress_context (extractive, ≤ 8 k chars)
-  • semantic cache   (via cache.py)
-
-New: X-Domain header propagated for sub-tenant partitioning.
-"""
-
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
@@ -30,10 +18,13 @@ from app.query import (
     get_embedder,
     extract_keywords,
     RAG_PROMPT,
+    deduplicate_chunks,
+    group_by_section,
 )
 from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.db import db_insert, db_rpc, db_keyword_search, db_test, HEADERS, BASE
 from app.config import settings
+
 
 # ──────────────────────────────────────────────
 # App + CORS
@@ -48,6 +39,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ──────────────────────────────────────────────
 # Models
@@ -66,13 +58,32 @@ class AnnotationUpdate(BaseModel):
 
 
 # ──────────────────────────────────────────────
-# Annotations
+# Junk filter (shared across routes)
 # ──────────────────────────────────────────────
+
 _JUNK_LINE_Q = re.compile(
     r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
     r'Issue\s+\d|Jan[-\s]June|available\s+at)',
     re.IGNORECASE
 )
+
+def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
+    clean = []
+    for c in chunks:
+        text  = c.get("chunk_text", "")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            continue
+        junk = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
+        if (junk / len(lines)) <= 0.4:
+            clean.append(c)
+    return clean
+
+
+# ──────────────────────────────────────────────
+# Annotations
+# ──────────────────────────────────────────────
+
 @app.post("/annotations")
 async def create_annotation(
     body:   AnnotationCreate,
@@ -143,14 +154,14 @@ async def health():
 
 
 # ──────────────────────────────────────────────
-# Ingest  (domain tag via optional header)
+# Ingest
 # ──────────────────────────────────────────────
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
     file:      UploadFile = File(...),
     claims:    dict       = Depends(verify_token),
-    x_domain:  str        = Header(default="general"),   # 7. domain partition
+    x_domain:  str        = Header(default="general"),
 ):
     org_id = claims.get("sub")
     if not org_id:
@@ -161,49 +172,41 @@ async def ingest(
 
 
 # ──────────────────────────────────────────────
-# Streaming query  — full pipeline
+# Streaming query
 # ──────────────────────────────────────────────
-def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
-    clean = []
-    for c in chunks:
-        text  = c.get("chunk_text", "")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
-            continue
-        junk = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
-        if (junk / len(lines)) <= 0.4:
-            clean.append(c)
-    return clean
+
 @app.post("/query/stream")
 async def query_stream(
-    body: QueryRequest,
+    body:   QueryRequest,
     claims: dict = Depends(verify_token)
 ):
     org_id = claims.get("custom:org_id") or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
-    from app.query import extract_keywords, deduplicate_chunks, group_by_section, RAG_PROMPT
-    from app.db import db_rpc, db_keyword_search
-    from app.ingest import embed_texts
+    from app.query import embed_query
 
-    # Embed + search (same as non-streaming)
-    query_vectors = await embed_texts([body.question])
-    query_vector  = query_vectors[0]
+    # ── Embed question using retrieval.query task ──
+    query_vector = await embed_query(body.question)
     keywords      = extract_keywords(body.question)
 
-    async def vs(): return await db_rpc("match_documents", {
-        "query_embedding": query_vector,
-        "match_count":     8,
-        "filter_org_id":   org_id,
-        "filter_doc_name": body.doc_name or ""
-    })
+    # ── Vector search ──
+    async def vs():
+        return await db_rpc("match_documents", {
+            "query_embedding": query_vector,
+            "match_count":     8,
+            "filter_org_id":   org_id,
+            "filter_doc_name": body.doc_name or ""
+        })
+
+    # ── Keyword search ──
     async def ks():
         results = []
-        tasks   = [db_keyword_search(org_id, kw,doc_name=body.doc_name) for kw in keywords[:3]]
+        tasks   = [db_keyword_search(org_id, kw, doc_name=body.doc_name) for kw in keywords[:3]]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         for b in batches:
-            if isinstance(b, list): results.extend(b)
+            if isinstance(b, list):
+                results.extend(b)
         return results
 
     vec, kw  = await asyncio.gather(vs(), ks())
@@ -218,15 +221,16 @@ async def query_stream(
     context = group_by_section(combined)
     prompt  = RAG_PROMPT.format(context=context, question=body.question)
 
+    # ── Build source passages — now includes page_number ──
     source_passages = [
-    {
-        "doc_name":   c["doc_name"],
-        "passage":    c["chunk_text"],
-        "similarity": round(c.get("similarity", 0), 3),
-        "section":    (c.get("metadata") or {}).get("section", ""),
-        "page_number": (c.get("metadata") or {}).get("page_number", 1),  # ← add this
-    }
-    for c in combined
+        {
+            "doc_name":    c["doc_name"],
+            "passage":     c["chunk_text"],
+            "similarity":  round(c.get("similarity", 0), 3),
+            "section":     (c.get("metadata") or {}).get("section", ""),
+            "page_number": (c.get("metadata") or {}).get("page_number", 1),
+        }
+        for c in combined
     ]
 
     async def stream_groq():
@@ -243,20 +247,21 @@ async def query_stream(
                     "temperature": 0.1,
                     "max_tokens":  512,
                     "stream":      True,
-                    "messages": [{"role": "user", "content": prompt}]
+                    "messages":    [{"role": "user", "content": prompt}]
                 }
             ) as resp:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]":
                         continue
                     try:
-                        chunk  = json.loads(line[6:])
-                        token  = chunk["choices"][0]["delta"].get("content", "")
+                        chunk = json.loads(line[6:])
+                        token = chunk["choices"][0]["delta"].get("content", "")
                         if token:
                             yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
                     except Exception:
                         continue
-                yield f"data: {json.dumps({'done': True, 'sources': [c['chunk_text'][:200]+'...' for c in combined], 'source_passages': source_passages})}\n\n"
+
+                yield f"data: {json.dumps({'done': True, 'sources': [c['chunk_text'][:200] + '...' for c in combined], 'source_passages': source_passages})}\n\n"
 
     return StreamingResponse(
         stream_groq(),
@@ -297,7 +302,7 @@ async def list_documents(claims: dict = Depends(verify_token)):
                 "created_at": d.get("created_at"),
                 "chunks":     meta.get("total_chunks", 0),
                 "file_url":   d.get("file_url"),
-                "domain":     meta.get("domain", "general"),   # expose domain
+                "domain":     meta.get("domain", "general"),
             })
 
     return {"documents": docs, "org_id": org_id}

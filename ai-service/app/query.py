@@ -461,6 +461,28 @@ Answer:"""
 )
 
 
+# ── Jina query embedder — uses retrieval.query task ───────────────────────────
+# This is different from embed_texts in ingest.py which uses retrieval.passage.
+# Using the correct task type significantly improves similarity scores.
+
+async def embed_query(question: str) -> list[float]:
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "input": [question],
+                "model": "jina-embeddings-v3",
+                "task":  "retrieval.query"   # ← correct task for questions
+            }
+        )
+        r.raise_for_status()
+        return r.json()["data"][0]["embedding"]
+
+
 # ── Groq LLM ──────────────────────────────────────────────────────────────────
 
 async def ask_groq(prompt: str) -> str:
@@ -475,7 +497,7 @@ async def ask_groq(prompt: str) -> str:
                 "model":       "llama-3.1-8b-instant",
                 "temperature": 0.1,
                 "max_tokens":  512,
-                "messages": [{"role": "user", "content": prompt}]
+                "messages":    [{"role": "user", "content": prompt}]
             }
         )
         r.raise_for_status()
@@ -483,6 +505,7 @@ async def ask_groq(prompt: str) -> str:
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
+
 _JUNK_LINE_Q = re.compile(
     r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
     r'Issue\s+\d|Jan[-\s]June|available\s+at)',
@@ -490,19 +513,19 @@ _JUNK_LINE_Q = re.compile(
 )
 
 def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
-    """Drop any chunks that slipped through ingest and are reference/URL heavy."""
     clean = []
     for c in chunks:
         text  = c.get("chunk_text", "")
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             continue
-        junk  = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
-        if len(lines) == 0 or (junk / len(lines)) <= 0.4:
+        junk = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
+        if (junk / len(lines)) <= 0.4:
             clean.append(c)
     return clean
+
+
 def get_embedder():
-    from app.ingest import embed_texts
     return embed_texts
 
 
@@ -588,7 +611,7 @@ def compress_context(chunks: list[dict], max_tokens: int = 1500) -> list[dict]:
 async def hybrid_retrieve(question: str, org_id: str, top_k: int = 6) -> list[dict]:
     from app.db import db_keyword_search
 
-    query_vector = (await embed_texts([question]))[0]
+    query_vector = await embed_query(question)   # ← use query embedder
     keywords     = extract_keywords(question)
 
     async def vector_search():
@@ -614,13 +637,12 @@ async def hybrid_retrieve(question: str, org_id: str, top_k: int = 6) -> list[di
 
 
 async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
-
     cached = await get_cached(org_id, question)
     if cached:
         print(f"Cache HIT org={org_id}")
         return cached
 
-    query_vector = (await embed_texts([question]))[0]
+    query_vector = await embed_query(question)   # ← use query embedder
     keywords     = extract_keywords(question)
 
     async def vector_search():
@@ -644,6 +666,7 @@ async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
 
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
     top = filter_junk_chunks(deduplicate_chunks(kw_chunks + vec_chunks))[:top_k]
+
     if not top:
         return {
             "answer":          "No relevant documents found for your organization.",
@@ -658,10 +681,11 @@ async def answer_question(question: str, org_id: str, top_k: int = 6) -> dict:
 
     source_passages = [
         {
-            "doc_name":   c["doc_name"],
-            "passage":    c["chunk_text"],
-            "similarity": round(c.get("similarity", 0), 3),
-            "section":    (c.get("metadata") or {}).get("section", "")
+            "doc_name":    c["doc_name"],
+            "passage":     c["chunk_text"],
+            "similarity":  round(c.get("similarity", 0), 3),
+            "section":     (c.get("metadata") or {}).get("section", ""),
+            "page_number": (c.get("metadata") or {}).get("page_number", 1),
         }
         for c in top
     ]
