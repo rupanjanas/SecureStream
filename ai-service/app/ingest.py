@@ -263,7 +263,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             json={
                 "input": texts,
                 "model": "jina-embeddings-v3",
-                "task": "retrieval.passage"
+                "task":  "retrieval.passage"
             }
         )
         r.raise_for_status()
@@ -312,6 +312,16 @@ def is_junk_chunk(text: str) -> bool:
     return (junk_lines / len(lines)) > 0.4
 
 
+# ── Clean a single page's text — preserves paragraph breaks ──────────────────
+
+def clean_page(text: str) -> str:
+    text = re.sub(r'-\n', '', text)            # fix hyphenated line breaks
+    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'([)\]])([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'[ \t]+', ' ', text)        # collapse spaces/tabs only, NOT newlines
+    return text.strip()
+
+
 # ── Semantic chunking ─────────────────────────────────────────────────────────
 
 def semantic_chunks(text: str) -> list[dict]:
@@ -321,6 +331,11 @@ def semantic_chunks(text: str) -> list[dict]:
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
 
     for para in paragraphs:
+        # Pass page markers through as-is
+        if re.match(r'^\[PAGE:\d+\]$', para.strip()):
+            chunks.append({"text": para.strip(), "level": "marker"})
+            continue
+
         if len(para) <= MAX_CHARS:
             if len(para) >= MIN_CHARS:
                 chunks.append({"text": para, "level": "paragraph"})
@@ -354,15 +369,6 @@ def semantic_chunks(text: str) -> list[dict]:
     return chunks
 
 
-def clean(text: str) -> str:
-    text = re.sub(r'-\n', '', text)
-    text = re.sub(r'\n+', ' ', text)
-    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
-    text = re.sub(r'([)\]])([A-Za-z])', r'\1 \2', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-
 def fingerprint(text: str) -> str:
     normalized = re.sub(r'\s+', ' ', text.lower().strip())
     normalized = re.sub(r'[^\w\s]', '', normalized)
@@ -381,11 +387,17 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
 
-        # Extract page number from marker injected during PDF extraction
-        page_match = re.match(r'^\[PAGE:(\d+)\]\s*', text)
+        # Handle standalone page marker chunks
+        page_match = re.match(r'^\[PAGE:(\d+)\]$', text.strip())
         if page_match:
             current_page = int(page_match.group(1))
-            text = text[page_match.end():].strip()
+            continue
+
+        # Handle inline markers (fallback)
+        inline_match = re.match(r'^\[PAGE:(\d+)\]\s*', text)
+        if inline_match:
+            current_page = int(inline_match.group(1))
+            text = text[inline_match.end():].strip()
             chunk["text"] = text
 
         if not text:
@@ -437,9 +449,9 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
     try:
         if suffix == ".pdf":
             doc = fitz.open(tmp_path)
-            pages = []
+            page_texts = []
 
-            for page_num, page in enumerate(doc, start=1):   # ← fixed: track every page
+            for page_num, page in enumerate(doc, start=1):
                 blocks = page.get_text("blocks")
                 block_texts = [
                     b[4].strip()
@@ -447,23 +459,22 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
                     if b[4].strip()
                 ]
                 if block_texts:
-                    pages.append((page_num, "\n\n".join(block_texts)))  # ← fixed: append inside loop
+                    # Clean each page individually to preserve paragraph structure
+                    cleaned = clean_page("\n\n".join(block_texts))
+                    # Prepend page marker on its own line so chunker sees it cleanly
+                    page_texts.append(f"[PAGE:{page_num}]\n\n{cleaned}")
 
             doc.close()
+            # Join pages — markers stay isolated between double newlines
+            raw_text = "\n\n".join(page_texts)
 
-            # Join pages with markers so build_hierarchy can track page numbers
-            raw_text = "\n\n".join(
-                f"[PAGE:{pn}]\n{text}" for pn, text in pages
-            )
         else:
-            raw_text = file_bytes.decode("utf-8", errors="ignore")
+            raw_text = clean_page(file_bytes.decode("utf-8", errors="ignore"))
 
-        full_text = clean(raw_text)
-
-        if not full_text:
+        if not raw_text:
             return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
 
-        raw_chunks = semantic_chunks(full_text)
+        raw_chunks = semantic_chunks(raw_text)
         structured = build_hierarchy(raw_chunks, filename)
 
         if not structured:
