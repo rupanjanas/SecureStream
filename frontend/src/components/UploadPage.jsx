@@ -1,7 +1,7 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { uploadDocument } from "../api/aiService";
+import { uploadDocument,getSession } from "../api/aiService";
 import { storeFile } from "../utils/filestore";
 
 export default function UploadPage({ user, orgId, mode }) {
@@ -54,7 +54,7 @@ export default function UploadPage({ user, orgId, mode }) {
         });
       }
 
-      const data = await uploadDocument(file, session.access_token); // ← real token
+      const data = await uploadDocument(file); // ← real token
       setResult(data);
       setStatus("done");
 

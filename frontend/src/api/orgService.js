@@ -1,12 +1,9 @@
+import { getSession } from "./aiService";
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 
 async function getToken() {
-  const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });
-  const session = await res.json();
-
-  console.log("SESSION:", session); // debug
-
+  const session = await getSession();
   return session?.access_token;
 }
 
@@ -143,12 +140,5 @@ export async function selectWorkspace(mode, orgId = null) {
     body: JSON.stringify({ mode, orgId })
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function listDocuments(token) {
-  const res = await fetch(`${AI_URL}/documents`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
   return res.json();
 }
