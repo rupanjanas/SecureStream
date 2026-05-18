@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallBack} from "react";
+import { useEffect, useState, useCallback} from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { getHealth, listDocuments, getSession } from "../api/aiService";
@@ -27,6 +27,9 @@ export default function Dashboard({ user, orgId, orgName, mode }) {
       setDocsLoading(false);
     }
   }, [orgId]); // ← Reacts to orgId changes
+  useEffect(() => {
+    loadDocs();
+  }, [loadDocs]);
 
   const aiOnline = health?.status === "ok";
   const dbOnline = health?.db === "connected";
