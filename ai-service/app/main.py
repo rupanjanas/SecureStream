@@ -194,7 +194,7 @@ async def query_stream(
     async def vs():
         return await db_rpc("match_documents", {
             "query_embedding": query_vector,
-            "match_count":     8,
+            "match_count":     20,
             "filter_org_id":   org_id,
             "filter_doc_name": body.doc_name or ""
         })
@@ -212,7 +212,9 @@ async def query_stream(
     vec, kw  = await asyncio.gather(vs(), ks())
     if vec:
         print(f"SAMPLE CHUNK: doc={vec[0].get('doc_name')} metadata={vec[0].get('metadata')} similarity={vec[0].get('similarity')}")
-    combined = filter_junk_chunks(deduplicate_chunks(kw + vec))[:body.top_k]
+    combined = filter_junk_chunks(deduplicate_chunks(kw + vec))
+    combined = rerank(body.question, combined)
+    combined = combined[:body.top_k]
 
     if not combined:
         async def empty():

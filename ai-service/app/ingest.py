@@ -407,9 +407,14 @@ def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
             continue
 
         is_header = (
-            len(text) < 120
+            len(text) < 80                          # shorter threshold
             and not text.endswith('.')
-            and (text.istitle() or text.isupper() or re.match(r'^\d+[\.\)]\s+', text))
+            and not text.endswith(':')              # requirement lines often end in :
+            and (
+                text.isupper()                      # ALL CAPS headers
+                or (text.istitle() and len(text.split()) <= 6)   # Title Case, max 6 words
+                or re.match(r'^\d+[\.\)]\s+[A-Z][a-z]', text)   # "1. Short Title" only
+            )
         )
 
         if is_header:
