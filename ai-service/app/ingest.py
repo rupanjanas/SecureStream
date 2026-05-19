@@ -475,6 +475,8 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
             return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
 
         raw_chunks = semantic_chunks(raw_text)
+        for c in raw_chunks[:10]:
+            print(f"CHUNK level={c['level']} text={c['text'][:80]!r}")
         structured = build_hierarchy(raw_chunks, filename)
 
         if not structured:
