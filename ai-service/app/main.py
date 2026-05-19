@@ -210,6 +210,8 @@ async def query_stream(
         return results
 
     vec, kw  = await asyncio.gather(vs(), ks())
+    if vec:
+        print(f"SAMPLE CHUNK: doc={vec[0].get('doc_name')} metadata={vec[0].get('metadata')} similarity={vec[0].get('similarity')}")
     combined = filter_junk_chunks(deduplicate_chunks(kw + vec))[:body.top_k]
 
     if not combined:
