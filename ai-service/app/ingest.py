@@ -240,17 +240,16 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
 
     return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
     
-from langchain.prompts import PromptTemplate
 from app.config import settings
-from app.db import db_rpc, db_insert
-from app.cache import get_cached, set_cached
+from app.db import db_insert
 import tempfile, os, re, hashlib
+from collections import Counter
 import httpx
 import fitz
 from app.db import HEADERS, BASE
 
 
-# ── Jina embeddings ──────────────────────────────────────────────────────────
+# ── Jina embeddings ───────────────────────────────────────────────────────────
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=60) as client:
@@ -271,20 +270,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         return [item["embedding"] for item in data["data"]]
 
 
-# ── Reference/junk filtering ──────────────────────────────────────────────────
-
-_REF_HEADER = re.compile(
-    r'^\s*(references?|bibliography|works\s+cited|sources?|citations?|'
-    r'further\s+reading|footnotes?|endnotes?|notes?)\s*$',
-    re.IGNORECASE | re.MULTILINE
-)
-
-_JUNK_LINE = re.compile(
-    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
-    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
-    re.IGNORECASE
-)
-
+# ── Storage ───────────────────────────────────────────────────────────────────
 
 async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
     path = f"{org_id}/{filename}"
@@ -297,12 +283,13 @@ async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> st
     return f"{BASE}/storage/v1/object/public/documents/{path}"
 
 
-def strip_references(text: str) -> str:
-    match = _REF_HEADER.search(text)
-    if match:
-        text = text[:match.start()]
-    return text.strip()
+# ── Junk filter ───────────────────────────────────────────────────────────────
 
+_JUNK_LINE = re.compile(
+    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
+    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
+    re.IGNORECASE
+)
 
 def is_junk_chunk(text: str) -> bool:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -312,30 +299,150 @@ def is_junk_chunk(text: str) -> bool:
     return (junk_lines / len(lines)) > 0.4
 
 
-# ── Clean a single page's text — preserves paragraph breaks ──────────────────
+# ── Text cleaning ─────────────────────────────────────────────────────────────
 
-def clean_page(text: str) -> str:
-    text = re.sub(r'-\n', '', text)            # fix hyphenated line breaks
+def clean_text(text: str) -> str:
+    text = re.sub(r'-\n', '', text)
     text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
     text = re.sub(r'([)\]])([A-Za-z])', r'\1 \2', text)
-    text = re.sub(r'[ \t]+', ' ', text)        # collapse spaces/tabs only, NOT newlines
+    text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
 
-# ── Semantic chunking ─────────────────────────────────────────────────────────
+# ── Fingerprint for dedup ─────────────────────────────────────────────────────
 
-def semantic_chunks(text: str) -> list[dict]:
+def fingerprint(text: str) -> str:
+    normalized = re.sub(r'\s+', ' ', text.lower().strip())
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    return hashlib.md5(normalized.encode()).hexdigest()
+
+
+# ── PDF structure extraction using font sizes ─────────────────────────────────
+
+def extract_pdf_spans(doc) -> list[dict]:
+    """
+    Extract all text spans from the PDF with font size, bold flag, and page number.
+    This gives us the raw material to detect headers reliably.
+    """
+    spans = []
+    for page_num, page in enumerate(doc, start=1):
+        blocks = page.get_text("dict")["blocks"]
+        for block in blocks:
+            if block.get("type") != 0:  # 0 = text block, skip images
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "").strip()
+                    if not text:
+                        continue
+                    spans.append({
+                        "text": text,
+                        "page": page_num,
+                        "size": round(span.get("size", 12), 1),
+                        "bold": bool(span.get("flags", 0) & 2 ** 4),
+                    })
+    return spans
+
+
+def build_chunks_from_spans(spans: list[dict], doc_name: str) -> list[dict]:
+    """
+    Use font size and bold flag to detect section headers.
+    The body font size is computed dynamically from the document itself,
+    so this works for any PDF regardless of font choices.
+    """
+    if not spans:
+        return []
+
+    # Compute body font size = most common size among longer spans
+    long_span_sizes = [s["size"] for s in spans if len(s["text"]) > 20]
+    if not long_span_sizes:
+        long_span_sizes = [s["size"] for s in spans]
+
+    body_size = Counter(long_span_sizes).most_common(1)[0][0]
+    # Anything 15% larger than body text or bold and short = header
+    header_size_threshold = body_size * 1.15
+
+    print(f"[{doc_name}] body_size={body_size} header_threshold={header_size_threshold:.1f}")
+
+    result          = []
+    current_section = "General"
+    section_idx     = 0
+    buffer          = ""
+    buffer_page     = 1
+
+    def flush_buffer():
+        nonlocal buffer, buffer_page
+        text = clean_text(buffer.strip())
+        if len(text) < 80 or is_junk_chunk(text):
+            buffer = ""
+            return
+        # Split long buffers into chunks of ~800 chars
+        while len(text) > 800:
+            split_at = text.rfind(' ', 0, 800)
+            if split_at == -1:
+                split_at = 800
+            chunk_text = text[:split_at].strip()
+            if len(chunk_text) >= 80:
+                result.append(_make_chunk(chunk_text, buffer_page, current_section, section_idx, doc_name, len(result)))
+            text = text[split_at:].strip()
+        if len(text) >= 80:
+            result.append(_make_chunk(text, buffer_page, current_section, section_idx, doc_name, len(result)))
+        buffer = ""
+
+    for span in spans:
+        text = span["text"]
+        size = span["size"]
+        bold = span["bold"]
+        page = span["page"]
+
+        is_header = (
+            (size >= header_size_threshold or (bold and size >= body_size * 0.95))
+            and len(text) < 200
+            and len(text) > 2
+            and not text.endswith(',')   # mid-sentence bold words aren't headers
+        )
+
+        if is_header:
+            flush_buffer()
+            current_section = text
+            section_idx    += 1
+            buffer_page     = page
+            print(f"  HEADER detected: {text!r} (size={size}, bold={bold}, page={page})")
+        else:
+            if not buffer:
+                buffer_page = page
+            buffer += " " + text
+
+    flush_buffer()  # flush any remaining text
+
+    return result
+
+
+def _make_chunk(text: str, page: int, section: str, section_idx: int, doc_name: str, idx: int) -> dict:
+    return {
+        "text":  text,
+        "level": "paragraph",
+        "metadata": {
+            "domain":        "general",
+            "chunk_index":   idx,
+            "section":       section,
+            "section_index": section_idx,
+            "doc_name":      doc_name,
+            "char_count":    len(text),
+            "page_number":   page,
+        }
+    }
+
+
+# ── TXT fallback chunker (kept for .txt files) ────────────────────────────────
+
+def semantic_chunks_txt(text: str) -> list[dict]:
     MAX_CHARS = 800
     MIN_CHARS = 80
     chunks = []
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
 
     for para in paragraphs:
-        # Pass page markers through as-is
-        if re.match(r'^\[PAGE:\d+\]$', para.strip()):
-            chunks.append({"text": para.strip(), "level": "marker"})
-            continue
-
         if len(para) <= MAX_CHARS:
             if len(para) >= MIN_CHARS:
                 chunks.append({"text": para, "level": "paragraph"})
@@ -369,73 +476,27 @@ def semantic_chunks(text: str) -> list[dict]:
     return chunks
 
 
-def fingerprint(text: str) -> str:
-    normalized = re.sub(r'\s+', ' ', text.lower().strip())
-    normalized = re.sub(r'[^\w\s]', '', normalized)
-    return hashlib.md5(normalized.encode()).hexdigest()
-
-
-# ── Hierarchical metadata ─────────────────────────────────────────────────────
-
-def build_hierarchy(chunks: list[dict], doc_name: str) -> list[dict]:
-    result           = []
-    current_section  = "Introduction"
-    current_page     = 1
-    section_idx      = 0
-    chunk_in_section = 0
+def build_hierarchy_txt(chunks: list[dict], doc_name: str) -> list[dict]:
+    """Fallback hierarchy builder for TXT files."""
+    result          = []
+    current_section = "General"
+    section_idx     = 0
 
     for i, chunk in enumerate(chunks):
         text = chunk["text"]
-
-        # Handle standalone page marker chunks
-        page_match = re.match(r'^\[PAGE:(\d+)\]$', text.strip())
-        if page_match:
-            current_page = int(page_match.group(1))
-            continue
-
-        # Handle inline markers (fallback)
-        inline_match = re.match(r'^\[PAGE:(\d+)\]\s*', text)
-        if inline_match:
-            current_page = int(inline_match.group(1))
-            text = text[inline_match.end():].strip()
-            chunk["text"] = text
-
-        if not text:
-            continue
-
         if is_junk_chunk(text):
             continue
-
-        is_header = (
-            len(text) < 80                          # shorter threshold
-            and not text.endswith('.')
-            and not text.endswith(':')              # requirement lines often end in :
-            and (
-                text.isupper()                      # ALL CAPS headers
-                or (text.istitle() and len(text.split()) <= 6)   # Title Case, max 6 words
-                or re.match(r'^\d+[\.\)]\s+[A-Z][a-z]', text)   # "1. Short Title" only
-            )
-        )
-
-        if is_header:
-            current_section  = text
-            section_idx     += 1
-            chunk_in_section = 0
-            continue
-
-        chunk_in_section += 1
         result.append({
             "text":  text,
             "level": chunk.get("level", "paragraph"),
             "metadata": {
-                "domain":              "general",
-                "chunk_index":         i,
-                "section":             current_section,
-                "section_index":       section_idx,
-                "position_in_section": chunk_in_section,
-                "doc_name":            doc_name,
-                "char_count":          len(text),
-                "page_number":         current_page,
+                "domain":        "general",
+                "chunk_index":   i,
+                "section":       current_section,
+                "section_index": section_idx,
+                "doc_name":      doc_name,
+                "char_count":    len(text),
+                "page_number":   1,
             }
         })
 
@@ -453,40 +514,19 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
 
     try:
         if suffix == ".pdf":
-            doc = fitz.open(tmp_path)
-            page_texts = []
-
-            for page_num, page in enumerate(doc, start=1):
-                blocks = page.get_text("blocks")
-                block_texts = [
-                    b[4].strip()
-                    for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
-                    if b[4].strip()
-                ]
-                if block_texts:
-                    # Clean each page individually to preserve paragraph structure
-                    cleaned = clean_page("\n\n".join(block_texts))
-                    # Prepend page marker on its own line so chunker sees it cleanly
-                    page_texts.append(f"[PAGE:{page_num}]\n\n{cleaned}")
-
+            doc        = fitz.open(tmp_path)
+            spans      = extract_pdf_spans(doc)
             doc.close()
-            # Join pages — markers stay isolated between double newlines
-            raw_text = "\n\n".join(page_texts)
-
+            structured = build_chunks_from_spans(spans, filename)
         else:
-            raw_text = clean_page(file_bytes.decode("utf-8", errors="ignore"))
-
-        if not raw_text:
-            return {"message": "No text extracted", "chunks_stored": 0, "doc_name": filename}
-
-        raw_chunks = semantic_chunks(raw_text)
-        for c in raw_chunks[:10]:
-            print(f"CHUNK level={c['level']} text={c['text'][:80]!r}")
-        structured = build_hierarchy(raw_chunks, filename)
+            raw_text   = clean_text(file_bytes.decode("utf-8", errors="ignore"))
+            raw_chunks = semantic_chunks_txt(raw_text)
+            structured = build_hierarchy_txt(raw_chunks, filename)
 
         if not structured:
             return {"message": "No chunks after processing", "chunks_stored": 0, "doc_name": filename}
 
+        # Deduplicate
         seen_fps = set()
         unique   = []
         for c in structured:
@@ -495,10 +535,13 @@ async def ingest_document(file_bytes: bytes, filename: str, org_id: str, domain:
                 seen_fps.add(fp)
                 unique.append(c)
 
-        print(f"[{filename}] {len(raw_chunks)} raw → {len(structured)} structured → {len(unique)} after dedup")
+        print(f"[{filename}] {len(structured)} structured → {len(unique)} after dedup")
+        print("Sample chunks:")
+        for c in unique[:5]:
+            print(f"  page={c['metadata']['page_number']} section={c['metadata']['section'][:40]!r} text={c['text'][:60]!r}")
 
-        texts = [c["text"] for c in unique]
-
+        # Embed in batches of 32
+        texts       = [c["text"] for c in unique]
         all_vectors = []
         for i in range(0, len(texts), 32):
             batch   = texts[i:i+32]
