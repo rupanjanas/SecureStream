@@ -215,7 +215,9 @@ async def query_stream(
     combined = filter_junk_chunks(deduplicate_chunks(kw + vec))
     combined = rerank(body.question, combined)
     combined = combined[:body.top_k]
-
+    
+    for i, c in enumerate(combined):
+        print(f"FINAL[{i}] page={c.get('metadata',{}).get('page_number')} section={c.get('metadata',{}).get('section','')[:40]} sim={c.get('similarity',0):.3f} text={c.get('chunk_text','')[:60]!r}")
     if not combined:
         async def empty():
             yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
