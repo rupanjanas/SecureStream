@@ -210,11 +210,12 @@ async def query_stream(
         return results
 
     vec, kw  = await asyncio.gather(vs(), ks())
-    if vec:
-        print(f"SAMPLE CHUNK: doc={vec[0].get('doc_name')} metadata={vec[0].get('metadata')} similarity={vec[0].get('similarity')}")
     combined = filter_junk_chunks(deduplicate_chunks(kw + vec))
     combined = rerank(body.question, combined)
     combined = combined[:body.top_k]
+
+    for i, c in enumerate(combined):
+        print(f"FINAL[{i}] page={c.get('metadata',{}).get('page_number')} section={c.get('metadata',{}).get('section','')[:40]} sim={c.get('similarity',0):.3f} text={c.get('chunk_text','')[:60]!r}")
     
     for i, c in enumerate(combined):
         print(f"FINAL[{i}] page={c.get('metadata',{}).get('page_number')} section={c.get('metadata',{}).get('section','')[:40]} sim={c.get('similarity',0):.3f} text={c.get('chunk_text','')[:60]!r}")

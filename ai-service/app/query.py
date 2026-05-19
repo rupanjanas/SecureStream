@@ -575,13 +575,30 @@ def group_by_section(chunks: list[dict]) -> str:
 
 def rerank(question: str, chunks: list[dict]) -> list[dict]:
     question_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
+    question_lower = question.lower()
+
+    section_keywords = {
+        "abstract":     ["abstract", "summary", "overview"],
+        "introduction": ["introduction", "background"],
+        "conclusion":   ["conclusion", "result", "finding"],
+        "methodology":  ["method", "approach", "system"],
+    }
 
     def score(chunk: dict) -> float:
         text        = chunk.get("chunk_text", "").lower()
         chunk_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
         overlap     = len(question_words & chunk_words) / max(len(question_words), 1)
         similarity  = chunk.get("similarity", 0.0)
-        return 0.6 * similarity + 0.4 * overlap
+
+        section = (chunk.get("metadata") or {}).get("section", "").lower()
+        section_boost = 0.0
+        for sec, triggers in section_keywords.items():
+            if any(t in question_lower for t in triggers):
+                if sec in section:
+                    section_boost = 0.3
+                    break
+
+        return 0.8 * similarity + 0.2 * overlap + section_boost
 
     return sorted(chunks, key=score, reverse=True)
 
