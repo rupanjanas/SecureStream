@@ -14,12 +14,14 @@ from app.query import (
     answer_question,
     hybrid_retrieve,
     rerank,
+    filter_junk_chunks,
     compress_context,
     get_embedder,
     extract_keywords,
-    RAG_PROMPT,
     deduplicate_chunks,
-    group_by_section,
+    build_context,
+    embed_query,
+    RAG_PROMPT,
 )
 from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.db import db_insert, db_rpc, db_keyword_search, db_test, HEADERS, BASE
@@ -55,29 +57,6 @@ class AnnotationCreate(BaseModel):
 
 class AnnotationUpdate(BaseModel):
     is_shared: bool
-
-
-# ──────────────────────────────────────────────
-# Junk filter (shared across routes)
-# ──────────────────────────────────────────────
-
-_JUNK_LINE_Q = re.compile(
-    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
-    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
-    re.IGNORECASE
-)
-
-def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
-    clean = []
-    for c in chunks:
-        text  = c.get("chunk_text", "")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
-            continue
-        junk = sum(1 for l in lines if _JUNK_LINE_Q.search(l))
-        if (junk / len(lines)) <= 0.4:
-            clean.append(c)
-    return clean
 
 
 # ──────────────────────────────────────────────
@@ -184,11 +163,9 @@ async def query_stream(
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
-    from app.query import embed_query
-
-    # ── Embed question using retrieval.query task ──
+    # ── Embed question ──
     query_vector = await embed_query(body.question)
-    keywords      = extract_keywords(body.question)
+    keywords     = extract_keywords(body.question)
 
     # ── Vector search ──
     async def vs():
@@ -202,7 +179,7 @@ async def query_stream(
     # ── Keyword search ──
     async def ks():
         results = []
-        tasks   = [db_keyword_search(org_id, kw, doc_name=body.doc_name) for kw in keywords[:3]]
+        tasks   = [db_keyword_search(org_id, kw, doc_name=body.doc_name) for kw in keywords[:4]]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         for b in batches:
             if isinstance(b, list):
@@ -214,21 +191,24 @@ async def query_stream(
     combined = rerank(body.question, combined)
     combined = combined[:body.top_k]
 
+    # Debug log
     for i, c in enumerate(combined):
-        print(f"FINAL[{i}] page={c.get('metadata',{}).get('page_number')} section={c.get('metadata',{}).get('section','')[:40]} sim={c.get('similarity',0):.3f} text={c.get('chunk_text','')[:60]!r}")
-    
-    for i, c in enumerate(combined):
-        print(f"FINAL[{i}] page={c.get('metadata',{}).get('page_number')} section={c.get('metadata',{}).get('section','')[:40]} sim={c.get('similarity',0):.3f} text={c.get('chunk_text','')[:60]!r}")
+        print(
+            f"FINAL[{i}] page={c.get('metadata', {}).get('page_number')} "
+            f"section={c.get('metadata', {}).get('section', '')[:40]} "
+            f"sim={c.get('similarity', 0):.3f} "
+            f"text={c.get('chunk_text', '')[:60]!r}"
+        )
+
     if not combined:
         async def empty():
             yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
         return StreamingResponse(empty(), media_type="text/event-stream")
 
-    context = group_by_section(combined)
+    context = build_context(combined)
     prompt  = RAG_PROMPT.format(context=context, question=body.question)
 
-    # ── Build source passages — now includes page_number ──
     source_passages = [
         {
             "doc_name":    c["doc_name"],
@@ -252,7 +232,7 @@ async def query_stream(
                 json={
                     "model":       "llama-3.1-8b-instant",
                     "temperature": 0.1,
-                    "max_tokens":  512,
+                    "max_tokens":  600,
                     "stream":      True,
                     "messages":    [{"role": "user", "content": prompt}]
                 }
