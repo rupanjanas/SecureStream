@@ -265,8 +265,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             }
         )
         r.raise_for_status()
-        data = r.json()
-        return [item["embedding"] for item in data["data"]]
+        return [item["embedding"] for item in r.json()["data"]]
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -274,7 +273,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
     path = f"{org_id}/{filename}"
     async with httpx.AsyncClient() as client:
-        r = await client.post(
+        await client.post(
             f"{BASE}/storage/v1/object/documents/{path}",
             headers={**HEADERS, "Content-Type": "application/octet-stream"},
             content=file_bytes,
@@ -282,101 +281,108 @@ async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> st
     return f"{BASE}/storage/v1/object/public/documents/{path}"
 
 
-# ── Junk filter ───────────────────────────────────────────────────────────────
-
-_JUNK_LINE = re.compile(
-    r'(https?://|www\.|doi\.org)',
-    re.IGNORECASE
-)
-
-def is_junk_chunk(text: str) -> bool:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines:
-        return True
-    junk = sum(1 for l in lines if _JUNK_LINE.search(l))
-    return (junk / len(lines)) > 0.5
-
-
-# ── Fingerprint for dedup ─────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def fingerprint(text: str) -> str:
-    normalized = re.sub(r'\s+', ' ', text.lower().strip())
-    normalized = re.sub(r'[^\w\s]', '', normalized)
-    return hashlib.md5(normalized.encode()).hexdigest()
+    n = re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', text.lower().strip()))
+    return hashlib.md5(n.encode()).hexdigest()
+
+def clean(text: str) -> str:
+    text = re.sub(r'-\s+', '', text)          # fix hyphenated line breaks
+    text = re.sub(r'\s+', ' ', text)          # collapse whitespace
+    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
+    return text.strip()
+
+_JUNK = re.compile(r'(https?://|www\.|doi\.org)', re.IGNORECASE)
+
+def is_junk(text: str) -> bool:
+    lines = [l.strip() for l in text.split('.') if l.strip()]
+    if not lines:
+        return True
+    return sum(1 for l in lines if _JUNK.search(l)) / len(lines) > 0.5
 
 
-# ── PDF text extraction per page ──────────────────────────────────────────────
+# ── Page-aware chunking ───────────────────────────────────────────────────────
+# Each page's text is split into chunks independently.
+# This guarantees page_number is always exactly correct —
+# a chunk on page 4 will always say page 4.
 
-def extract_pages(doc) -> list[dict]:
+def chunk_page_text(text: str, page_num: int, doc_name: str,
+                    chunk_size: int = 400, overlap: int = 60) -> list[dict]:
     """
-    Extract text per page preserving page numbers.
-    Uses simple block extraction — no font analysis.
+    Split a single page's text into overlapping word-count chunks.
+    Since we never cross page boundaries, page_number is always exact.
+    overlap ensures sentences at the bottom of a chunk appear
+    at the top of the next — no content is ever lost at seams.
     """
-    pages = []
-    for page_num, page in enumerate(doc, start=1):
-        blocks = page.get_text("blocks")
-        texts  = [
-            b[4].strip()
-            for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
-            if b[4].strip()
-        ]
-        text = " ".join(texts)
-        # Basic cleanup
-        text = re.sub(r'-\s+', '', text)           # fix hyphenated breaks
-        text = re.sub(r'\s+', ' ', text)           # collapse whitespace
-        text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
-        text = text.strip()
-        if text:
-            pages.append({"text": text, "page": page_num})
-    return pages
-
-
-# ── Sliding window chunker ────────────────────────────────────────────────────
-
-def sliding_window_chunks(
-    pages:      list[dict],
-    chunk_size: int = 400,   # words per chunk
-    overlap:    int = 80,    # words overlap between chunks
-) -> list[dict]:
-    """
-    Split document into overlapping fixed-size chunks by word count.
-    Overlap ensures context at chunk boundaries is never lost.
-    Works reliably on any document regardless of formatting.
-    """
-    # Build a flat list of (word, page_number) pairs
-    word_pages = []
-    for p in pages:
-        words = p["text"].split()
-        for w in words:
-            word_pages.append((w, p["page"]))
-
-    if not word_pages:
+    words = text.split()
+    if len(words) < 20:          # skip near-empty pages (cover, blank, ToC)
         return []
 
-    chunks  = []
-    start   = 0
-    total   = len(word_pages)
+    chunks = []
+    start  = 0
+    total  = len(words)
 
     while start < total:
         end        = min(start + chunk_size, total)
-        chunk_wps  = word_pages[start:end]
-        chunk_text = " ".join(w for w, _ in chunk_wps)
-        chunk_page = chunk_wps[0][1]   # page of first word in chunk
+        chunk_text = " ".join(words[start:end])
 
-        if len(chunk_text.strip()) >= 80 and not is_junk_chunk(chunk_text):
+        if len(chunk_text) >= 80 and not is_junk(chunk_text):
             chunks.append({
-                "text": chunk_text,
-                "page": chunk_page,
+                "text":     chunk_text,
+                "page":     page_num,
+                "doc_name": doc_name,
             })
 
         if end == total:
             break
-        start += chunk_size - overlap   # slide forward with overlap
+        start += chunk_size - overlap
 
     return chunks
 
 
-# ── Main ingest function ──────────────────────────────────────────────────────
+# ── PDF extraction ────────────────────────────────────────────────────────────
+
+def extract_and_chunk_pdf(doc, filename: str) -> list[dict]:
+    all_chunks = []
+
+    for page_num, page in enumerate(doc, start=1):
+        # Extract blocks in reading order (top→bottom, left→right)
+        blocks = page.get_text("blocks")
+        block_texts = [
+            b[4].strip()
+            for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
+            if b[4].strip()
+        ]
+        page_text = clean(" ".join(block_texts))
+
+        if not page_text:
+            continue
+
+        chunks = chunk_page_text(page_text, page_num, filename)
+        all_chunks.extend(chunks)
+
+    return all_chunks
+
+
+# ── TXT extraction ────────────────────────────────────────────────────────────
+
+def extract_and_chunk_txt(raw: str, filename: str) -> list[dict]:
+    text = clean(raw)
+    # For TXT files treat the whole file as page 1
+    # but split into paragraphs first to get better chunks
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    all_chunks = []
+    page_num   = 1
+
+    for para in paragraphs:
+        chunks = chunk_page_text(para, page_num, filename, chunk_size=400, overlap=60)
+        all_chunks.extend(chunks)
+
+    return all_chunks
+
+
+# ── Main ingest ───────────────────────────────────────────────────────────────
 
 async def ingest_document(
     file_bytes: bytes,
@@ -393,43 +399,33 @@ async def ingest_document(
     try:
         if suffix == ".pdf":
             doc    = fitz.open(tmp_path)
-            pages  = extract_pages(doc)
+            chunks = extract_and_chunk_pdf(doc, filename)
             doc.close()
-            chunks = sliding_window_chunks(pages, chunk_size=400, overlap=80)
         else:
-            raw   = file_bytes.decode("utf-8", errors="ignore")
-            raw   = re.sub(r'\s+', ' ', raw).strip()
-            pages = [{"text": raw, "page": 1}]
-            chunks = sliding_window_chunks(pages, chunk_size=400, overlap=80)
+            raw    = file_bytes.decode("utf-8", errors="ignore")
+            chunks = extract_and_chunk_txt(raw, filename)
 
         if not chunks:
-            return {
-                "message":       "No chunks after processing",
-                "chunks_stored": 0,
-                "doc_name":      filename
-            }
+            return {"message": "No chunks", "chunks_stored": 0, "doc_name": filename}
 
         # Deduplicate
-        seen_fps = set()
-        unique   = []
+        seen, unique = set(), []
         for c in chunks:
             fp = fingerprint(c["text"])
-            if fp not in seen_fps:
-                seen_fps.add(fp)
+            if fp not in seen:
+                seen.add(fp)
                 unique.append(c)
 
-        print(f"[{filename}] {len(chunks)} chunks → {len(unique)} after dedup")
-        print("Sample chunks:")
+        print(f"[{filename}] {len(chunks)} chunks → {len(unique)} unique")
         for c in unique[:5]:
-            print(f"  page={c['page']} text={c['text'][:80]!r}")
+            print(f"  page={c['page']} text={c['text'][:70]!r}")
 
-        # Embed in batches of 32
+        # Embed in batches
         texts       = [c["text"] for c in unique]
         all_vectors = []
         for i in range(0, len(texts), 32):
-            batch   = texts[i:i + 32]
-            vectors = await embed_texts(batch)
-            all_vectors.extend(vectors)
+            vecs = await embed_texts(texts[i:i + 32])
+            all_vectors.extend(vecs)
 
         rows = [
             {
@@ -450,11 +446,7 @@ async def ingest_document(
         ]
 
         await db_insert("documents", rows)
+        return {"message": "Ingested successfully", "chunks_stored": len(rows), "doc_name": filename}
 
-        return {
-            "message":       "Ingested successfully",
-            "chunks_stored": len(rows),
-            "doc_name":      filename
-        }
     finally:
         os.unlink(tmp_path)
