@@ -433,274 +433,246 @@ from app.db import db_rpc, db_insert
 from app.cache import get_cached, set_cached
 from app.ingest import embed_texts
 import asyncio, re, httpx
-
-
+ 
+ 
 # ── Stop words ────────────────────────────────────────────────────────────────
-
+ 
 STOP_WORDS = {
-    "what","is","the","a","an","of","in","on","at","to","for","and","or",
-    "are","was","were","has","have","does","do","did","this","that","with",
-    "from","by","about","how","when","where","who","which","can","will",
-    "there","any","all","tell","me","show","give","find","list","please",
-    "could","would","should","its","it","be","been","being","get","got"
+    "what", "is", "the", "a", "an", "of", "in", "on", "at", "to", "for",
+    "and", "or", "are", "was", "were", "has", "have", "does", "do", "did",
+    "this", "that", "with", "from", "by", "about", "how", "when", "where",
+    "who", "which", "can", "will", "there", "any", "all", "tell", "me",
+    "show", "give", "find", "list", "please", "could", "would", "should",
+    "its", "it", "be", "been", "being", "get", "got", "just", "also",
+    "section", "page", "document", "text", "content",
 }
-
-# ── RAG Prompt ────────────────────────────────────────────────────────────────
-
+ 
+# ── RAG prompt ────────────────────────────────────────────────────────────────
+ 
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
     template="""You are a helpful document assistant. Answer the question using ONLY the context below.
-
+ 
 Rules:
 - Summarize and paraphrase clearly. You do not need to quote verbatim.
 - If the context contains relevant information, always use it — even if partial.
-- Only say "Not found in the uploaded document." if there is truly NO relevant information.
-- Never make up information not present in the context.
-- Never reference URLs, bibliography entries, or citation lists.
-
+- Only say "Not found in the uploaded document." if there is truly NO relevant information at all.
+- Never make up information not in the context.
+- Never reference URLs or bibliography entries.
+ 
 Context:
 {context}
-
+ 
 Question: {question}
-
+ 
 Answer:"""
 )
-
-
+ 
+ 
 # ── Jina query embedder ───────────────────────────────────────────────────────
-
+ 
 async def embed_query(question: str) -> list[float]:
-    """Embed a query using retrieval.query task — different from passage embedding."""
+    """
+    Embed a query using retrieval.query task.
+    MUST be different from embed_texts which uses retrieval.passage —
+    Jina v3 is asymmetric and this separation is critical for good similarity scores.
+    """
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.jina.ai/v1/embeddings",
             headers={
                 "Authorization": f"Bearer {settings.jina_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type":  "application/json",
             },
             json={
                 "input": [question],
                 "model": "jina-embeddings-v3",
-                "task":  "retrieval.query"
-            }
+                "task":  "retrieval.query",
+            },
         )
         r.raise_for_status()
         return r.json()["data"][0]["embedding"]
-
-
-# ── Groq LLM ──────────────────────────────────────────────────────────────────
-
+ 
+ 
+# ── Groq ──────────────────────────────────────────────────────────────────────
+ 
 async def ask_groq(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {settings.groq_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type":  "application/json",
             },
             json={
                 "model":       "llama-3.1-8b-instant",
                 "temperature": 0.1,
                 "max_tokens":  600,
-                "messages":    [{"role": "user", "content": prompt}]
-            }
+                "messages":    [{"role": "user", "content": prompt}],
+            },
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
-
-
+ 
+ 
 # ── Keyword extraction ────────────────────────────────────────────────────────
-
+ 
 def extract_keywords(question: str) -> list[str]:
     words    = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
     keywords = [w for w in words if w not in STOP_WORDS]
-    # Add partial stems for longer words
-    stems    = [w[:6] for w in keywords if len(w) >= 8]
-    return list(dict.fromkeys(keywords + stems))[:8]  # preserve order, dedupe
-
-
+    # Add stems for longer words to catch morphological variants
+    stems    = [w[:5] for w in keywords if len(w) >= 7]
+    return list(dict.fromkeys(keywords + stems))[:8]
+ 
+ 
 # ── Junk filter ───────────────────────────────────────────────────────────────
-
-_JUNK_RE = re.compile(
-    r'(https?://|www\.|doi\.org|visited\s+on|IP\s+Bulletin|Volume\s+[IVX]+|'
-    r'Issue\s+\d|Jan[-\s]June|available\s+at)',
-    re.IGNORECASE
-)
-
-def is_junk(text: str) -> bool:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines:
-        return True
-    junk = sum(1 for l in lines if _JUNK_RE.search(l))
-    return (junk / len(lines)) > 0.4
-
-
+ 
+_JUNK_RE = re.compile(r'(https?://|www\.|doi\.org)', re.IGNORECASE)
+ 
+def filter_junk(chunks: list[dict]) -> list[dict]:
+    result = []
+    for c in chunks:
+        text      = c.get("chunk_text", "")
+        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        if not sentences:
+            continue
+        junk = sum(1 for s in sentences if _JUNK_RE.search(s))
+        if junk / len(sentences) <= 0.5:
+            result.append(c)
+    return result
+ 
+ 
 # ── Deduplication ─────────────────────────────────────────────────────────────
-
-def deduplicate_chunks(chunks: list[dict]) -> list[dict]:
+ 
+def deduplicate(chunks: list[dict]) -> list[dict]:
     seen = []
     for c in chunks:
         text   = c.get("chunk_text", "").lower().strip()
         is_dup = False
         for s in seen:
             s_text = s.get("chunk_text", "").lower().strip()
-            # Substring check
             if text in s_text or s_text in text:
                 is_dup = True
                 break
-            # Jaccard similarity
             set_a = set(text.split())
             set_b = set(s_text.split())
             union = len(set_a | set_b)
-            if union > 0 and len(set_a & set_b) / union > 0.85:
+            if union > 0 and len(set_a & set_b) / union > 0.82:
                 is_dup = True
                 break
         if not is_dup:
             seen.append(c)
     return seen
-
-
-# ── Reranker with section boost ───────────────────────────────────────────────
-
-# Maps question intent to section names that should be boosted
-SECTION_BOOST_MAP = {
-    "abstract":      ["abstract", "summary", "overview"],
-    "introduction":  ["introduction", "background", "overview"],
-    "conclusion":    ["conclusion", "summary", "result", "finding", "future"],
-    "methodology":   ["method", "approach", "system", "design", "architecture", "implementation"],
-    "result":        ["result", "evaluation", "experiment", "performance", "finding"],
-    "related":       ["related", "literature", "prior", "existing"],
-    "contribution":  ["contribution", "objective", "goal", "aim"],
-    "dataset":       ["dataset", "data", "corpus", "collection"],
-    "limitation":    ["limitation", "constraint", "future", "challenge"],
-}
-
+ 
+ 
+# ── Reranker ──────────────────────────────────────────────────────────────────
+ 
 def rerank(question: str, chunks: list[dict]) -> list[dict]:
-    question_lower = question.lower()
-    question_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question_lower))
-
+    """
+    Score = 0.8 × vector_similarity + 0.2 × keyword_overlap
+    Vector similarity dominates so keyword false-positives can't override
+    genuinely relevant chunks. No section boost — sections are now just
+    'Page N' so boosting them would be meaningless.
+    """
+    q_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
+ 
     def score(chunk: dict) -> float:
         text        = chunk.get("chunk_text", "").lower()
-        chunk_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+        c_words     = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+        overlap     = len(q_words & c_words) / max(len(q_words), 1)
         similarity  = chunk.get("similarity", 0.0)
-
-        # Keyword overlap score
-        overlap = len(question_words & chunk_words) / max(len(question_words), 1)
-
-        # Section boost — check if question intent matches chunk's section
-        section      = (chunk.get("metadata") or {}).get("section", "").lower()
-        section_boost = 0.0
-        for intent, section_names in SECTION_BOOST_MAP.items():
-            # Check if question mentions this intent
-            if any(kw in question_lower for kw in [intent] + section_names[:2]):
-                # Check if chunk's section matches
-                if any(sn in section for sn in section_names):
-                    section_boost = 0.35
-                    break
-
-        # Position boost — earlier chunks in a section tend to be more relevant
-        position = (chunk.get("metadata") or {}).get("position_in_section", 99)
-        position_boost = 0.05 if position <= 3 else 0.0
-
-        return 0.75 * similarity + 0.15 * overlap + section_boost + position_boost
-
+        return 0.8 * similarity + 0.2 * overlap
+ 
     return sorted(chunks, key=score, reverse=True)
-
-
+ 
+ 
 # ── Context builder ───────────────────────────────────────────────────────────
-
+ 
 def build_context(chunks: list[dict], max_words: int = 1200) -> str:
-    """
-    Build context string grouped by section.
-    Truncates to max_words to stay within LLM context limits.
-    """
-    sections: dict[str, list[str]] = {}
-    for c in chunks:
-        meta    = c.get("metadata") or {}
-        section = meta.get("section", "General")
-        doc     = c.get("doc_name", "")
-        key     = f"{doc} › {section}" if doc else section
-        sections.setdefault(key, []).append(c["chunk_text"])
-
     parts      = []
     word_count = 0
-    for label, texts in sections.items():
-        parts.append(f"[{label}]")
-        for t in texts:
-            words = t.split()
-            if word_count + len(words) > max_words:
-                remaining = max_words - word_count
-                if remaining > 30:
-                    parts.append("  " + " ".join(words[:remaining]) + "…")
-                return "\n".join(parts)
-            parts.append("  " + t)
-            word_count += len(words)
-
-    return "\n".join(parts)
-
-
-# ── Helper exports ────────────────────────────────────────────────────────────
-
+ 
+    for c in chunks:
+        text  = c.get("chunk_text", "")
+        page  = (c.get("metadata") or {}).get("page_number", "?")
+        words = text.split()
+ 
+        if word_count + len(words) > max_words:
+            remaining = max_words - word_count
+            if remaining > 30:
+                parts.append(f"[Page {page}]\n" + " ".join(words[:remaining]) + "…")
+            break
+ 
+        parts.append(f"[Page {page}]\n{text}")
+        word_count += len(words)
+ 
+    return "\n\n".join(parts)
+ 
+ 
+# ── Exported helpers (used by main.py) ────────────────────────────────────────
+ 
 def get_embedder():
     return embed_texts
-
+ 
 def compress_context(chunks, max_tokens=1500):
     return chunks
-
+ 
 def group_by_section(chunks):
     return build_context(chunks)
-
-def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
-    return [c for c in chunks if not is_junk(c.get("chunk_text", ""))]
-
-
-# ── Main answer pipeline (non-streaming) ─────────────────────────────────────
-
+ 
+def filter_junk_chunks(chunks):
+    return filter_junk(chunks)
+ 
+def deduplicate_chunks(chunks):
+    return deduplicate(chunks)
+ 
+ 
+# ── Full answer pipeline (non-streaming) ─────────────────────────────────────
+ 
 async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
     cached = await get_cached(org_id, question)
     if cached:
         print(f"Cache HIT org={org_id}")
         return cached
-
+ 
     query_vector = await embed_query(question)
     keywords     = extract_keywords(question)
-
+ 
     async def vector_search():
         return await db_rpc("match_documents", {
             "query_embedding": query_vector,
             "match_count":     20,
             "filter_org_id":   org_id,
         })
-
+ 
     async def keyword_search():
         from app.db import db_keyword_search
         results = []
         batches = await asyncio.gather(
             *[db_keyword_search(org_id, kw) for kw in keywords[:4]],
-            return_exceptions=True
+            return_exceptions=True,
         )
         for b in batches:
             if isinstance(b, list):
                 results.extend(b)
         return results
-
+ 
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
-    combined = filter_junk_chunks(deduplicate_chunks(kw_chunks + vec_chunks))
-    combined = rerank(question, combined)
-    combined = combined[:top_k]
-
+    combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+    combined = rerank(question, combined)[:top_k]
+ 
     if not combined:
         return {
             "answer":          "No relevant documents found.",
             "sources":         [],
             "source_passages": [],
-            "org_id":          org_id
+            "org_id":          org_id,
         }
-
+ 
     context = build_context(combined)
     prompt  = RAG_PROMPT.format(context=context, question=question)
     answer  = await ask_groq(prompt)
-
+ 
     source_passages = [
         {
             "doc_name":    c["doc_name"],
@@ -711,50 +683,50 @@ async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
         }
         for c in combined
     ]
-
+ 
     result = {
         "answer":          answer,
         "sources":         [c["chunk_text"][:200] + "..." for c in combined],
         "source_passages": source_passages,
-        "org_id":          org_id
+        "org_id":          org_id,
     }
-
+ 
     await set_cached(org_id, question, result, ttl=300)
     asyncio.create_task(db_insert("query_logs", [{
         "org_id":   org_id,
         "question": question,
-        "answer":   answer
+        "answer":   answer,
     }]))
-
+ 
     return result
-
-
-# ── Hybrid retrieve (used by answer_question internally) ─────────────────────
-
+ 
+ 
+# ── Hybrid retrieve ───────────────────────────────────────────────────────────
+ 
 async def hybrid_retrieve(question: str, org_id: str, top_k: int = 5) -> list[dict]:
     from app.db import db_keyword_search
-
+ 
     query_vector = await embed_query(question)
     keywords     = extract_keywords(question)
-
+ 
     async def vector_search():
         return await db_rpc("match_documents", {
             "query_embedding": query_vector,
             "match_count":     20,
             "filter_org_id":   org_id,
         })
-
+ 
     async def keyword_search():
         results = []
         batches = await asyncio.gather(
             *[db_keyword_search(org_id, kw) for kw in keywords[:4]],
-            return_exceptions=True
+            return_exceptions=True,
         )
         for b in batches:
             if isinstance(b, list):
                 results.extend(b)
         return results
-
+ 
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
-    combined = filter_junk_chunks(deduplicate_chunks(kw_chunks + vec_chunks))
+    combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
     return rerank(question, combined)[:top_k]

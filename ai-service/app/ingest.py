@@ -242,34 +242,38 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
     
 from app.config import settings
 from app.db import db_insert
+from app.db import HEADERS, BASE
+ 
 import tempfile, os, re, hashlib
 import httpx
 import fitz
-from app.db import HEADERS, BASE
-
-
+ 
+from llama_index.core.node_parser import SentenceSplitter
+ 
+ 
 # ── Jina embeddings ───────────────────────────────────────────────────────────
-
+ 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed a list of passages using Jina v3 retrieval.passage task."""
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.jina.ai/v1/embeddings",
             headers={
                 "Authorization": f"Bearer {settings.jina_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type":  "application/json",
             },
             json={
                 "input": texts,
                 "model": "jina-embeddings-v3",
-                "task":  "retrieval.passage"
-            }
+                "task":  "retrieval.passage",
+            },
         )
         r.raise_for_status()
         return [item["embedding"] for item in r.json()["data"]]
-
-
-# ── Storage ───────────────────────────────────────────────────────────────────
-
+ 
+ 
+# ── Storage upload (optional) ─────────────────────────────────────────────────
+ 
 async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
     path = f"{org_id}/{filename}"
     async with httpx.AsyncClient() as client:
@@ -279,154 +283,180 @@ async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> st
             content=file_bytes,
         )
     return f"{BASE}/storage/v1/object/public/documents/{path}"
-
-
+ 
+ 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
+ 
 def fingerprint(text: str) -> str:
     n = re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', text.lower().strip()))
     return hashlib.md5(n.encode()).hexdigest()
-
-def clean(text: str) -> str:
-    text = re.sub(r'-\s+', '', text)          # fix hyphenated line breaks
-    text = re.sub(r'\s+', ' ', text)          # collapse whitespace
-    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
+ 
+def clean_page_text(text: str) -> str:
+    """Clean extracted page text without destroying structure."""
+    text = re.sub(r'-\s*\n\s*', '', text)        # fix hyphenated line breaks
+    text = re.sub(r'\s+', ' ', text)              # collapse all whitespace
+    text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)  # fix missing spaces
     return text.strip()
-
+ 
 _JUNK = re.compile(r'(https?://|www\.|doi\.org)', re.IGNORECASE)
-
+ 
 def is_junk(text: str) -> bool:
-    lines = [l.strip() for l in text.split('.') if l.strip()]
-    if not lines:
+    sentences = [s.strip() for s in text.split('.') if s.strip()]
+    if not sentences:
         return True
-    return sum(1 for l in lines if _JUNK.search(l)) / len(lines) > 0.5
-
-
-# ── Page-aware chunking ───────────────────────────────────────────────────────
-# Each page's text is split into chunks independently.
-# This guarantees page_number is always exactly correct —
-# a chunk on page 4 will always say page 4.
-
-def chunk_page_text(text: str, page_num: int, doc_name: str,
-                    chunk_size: int = 400, overlap: int = 60) -> list[dict]:
+    junk_count = sum(1 for s in sentences if _JUNK.search(s))
+    return junk_count / len(sentences) > 0.5
+ 
+ 
+# ── LlamaIndex SentenceSplitter ───────────────────────────────────────────────
+# chunk_size=512 tokens (~400 words) — large enough for context, small enough
+# for precise retrieval. chunk_overlap=64 tokens ensures no content lost at seams.
+ 
+_splitter = SentenceSplitter(
+    chunk_size=512,
+    chunk_overlap=64,
+    paragraph_separator="\n\n",
+    secondary_chunking_regex="[^,.;。？！]+[,.;。？！]?",
+)
+ 
+ 
+def split_page_into_chunks(page_text: str) -> list[str]:
     """
-    Split a single page's text into overlapping word-count chunks.
-    Since we never cross page boundaries, page_number is always exact.
-    overlap ensures sentences at the bottom of a chunk appear
-    at the top of the next — no content is ever lost at seams.
+    Use LlamaIndex SentenceSplitter to split a page's text into
+    semantically coherent chunks that respect sentence boundaries.
+    Returns a list of chunk strings.
     """
-    words = text.split()
-    if len(words) < 20:          # skip near-empty pages (cover, blank, ToC)
-        return []
-
-    chunks = []
-    start  = 0
-    total  = len(words)
-
-    while start < total:
-        end        = min(start + chunk_size, total)
-        chunk_text = " ".join(words[start:end])
-
-        if len(chunk_text) >= 80 and not is_junk(chunk_text):
-            chunks.append({
-                "text":     chunk_text,
-                "page":     page_num,
-                "doc_name": doc_name,
-            })
-
-        if end == total:
-            break
-        start += chunk_size - overlap
-
-    return chunks
-
-
+    nodes = _splitter.get_nodes_from_documents(
+        [type('Doc', (), {'text': page_text, 'get_content': lambda self, **kw: self.text, 'metadata': {}, 'id_': '0', 'excluded_embed_metadata_keys': [], 'excluded_llm_metadata_keys': [], 'metadata_seperator': '\n', 'metadata_template': '{key}: {value}', 'text_template': '{content}'})()]
+    )
+    return [n.get_content() for n in nodes if len(n.get_content().strip()) >= 60]
+ 
+ 
 # ── PDF extraction ────────────────────────────────────────────────────────────
-
-def extract_and_chunk_pdf(doc, filename: str) -> list[dict]:
+ 
+def extract_pdf_chunks(doc, filename: str) -> list[dict]:
+    """
+    Extract text page by page and chunk within each page.
+    Page numbers are guaranteed correct because we never cross page boundaries.
+    """
     all_chunks = []
-
+ 
     for page_num, page in enumerate(doc, start=1):
-        # Extract blocks in reading order (top→bottom, left→right)
+        # Extract blocks in reading order
         blocks = page.get_text("blocks")
         block_texts = [
             b[4].strip()
             for b in sorted(blocks, key=lambda b: (round(b[1] / 10), b[0]))
             if b[4].strip()
         ]
-        page_text = clean(" ".join(block_texts))
-
-        if not page_text:
+ 
+        if not block_texts:
             continue
-
-        chunks = chunk_page_text(page_text, page_num, filename)
-        all_chunks.extend(chunks)
-
+ 
+        page_text = clean_page_text(" ".join(block_texts))
+ 
+        if len(page_text.split()) < 20:
+            # Skip near-empty pages (cover, blank pages, ToC page numbers)
+            continue
+ 
+        try:
+            chunk_texts = split_page_into_chunks(page_text)
+        except Exception:
+            # Fallback: simple word-count split if LlamaIndex fails
+            words = page_text.split()
+            chunk_texts = [
+                " ".join(words[i:i+400])
+                for i in range(0, len(words), 340)
+                if len(" ".join(words[i:i+400])) >= 60
+            ]
+ 
+        for chunk_text in chunk_texts:
+            if not is_junk(chunk_text):
+                all_chunks.append({
+                    "text":     chunk_text,
+                    "page":     page_num,
+                    "doc_name": filename,
+                })
+ 
     return all_chunks
-
-
+ 
+ 
 # ── TXT extraction ────────────────────────────────────────────────────────────
-
-def extract_and_chunk_txt(raw: str, filename: str) -> list[dict]:
-    text = clean(raw)
-    # For TXT files treat the whole file as page 1
-    # but split into paragraphs first to get better chunks
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+ 
+def extract_txt_chunks(raw: str, filename: str) -> list[dict]:
+    """Split a plain text file into chunks. No page concept — all page 1."""
+    text = clean_page_text(raw)
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if len(p.strip()) >= 60]
+ 
     all_chunks = []
-    page_num   = 1
-
     for para in paragraphs:
-        chunks = chunk_page_text(para, page_num, filename, chunk_size=400, overlap=60)
-        all_chunks.extend(chunks)
-
+        try:
+            chunk_texts = split_page_into_chunks(para)
+        except Exception:
+            chunk_texts = [para] if len(para) >= 60 else []
+ 
+        for chunk_text in chunk_texts:
+            if not is_junk(chunk_text):
+                all_chunks.append({
+                    "text":     chunk_text,
+                    "page":     1,
+                    "doc_name": filename,
+                })
+ 
     return all_chunks
-
-
+ 
+ 
 # ── Main ingest ───────────────────────────────────────────────────────────────
-
+ 
 async def ingest_document(
     file_bytes: bytes,
     filename:   str,
     org_id:     str,
-    domain:     str = "general"
+    domain:     str = "general",
 ) -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
-
+ 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
-
+ 
     try:
+        # ── Extract chunks ──
         if suffix == ".pdf":
             doc    = fitz.open(tmp_path)
-            chunks = extract_and_chunk_pdf(doc, filename)
+            chunks = extract_pdf_chunks(doc, filename)
             doc.close()
         else:
             raw    = file_bytes.decode("utf-8", errors="ignore")
-            chunks = extract_and_chunk_txt(raw, filename)
-
+            chunks = extract_txt_chunks(raw, filename)
+ 
         if not chunks:
-            return {"message": "No chunks", "chunks_stored": 0, "doc_name": filename}
-
-        # Deduplicate
+            return {
+                "message":       "No content extracted",
+                "chunks_stored": 0,
+                "doc_name":      filename,
+            }
+ 
+        # ── Deduplicate ──
         seen, unique = set(), []
         for c in chunks:
             fp = fingerprint(c["text"])
             if fp not in seen:
                 seen.add(fp)
                 unique.append(c)
-
-        print(f"[{filename}] {len(chunks)} chunks → {len(unique)} unique")
+ 
+        print(f"[{filename}] {len(chunks)} chunks → {len(unique)} after dedup")
         for c in unique[:5]:
-            print(f"  page={c['page']} text={c['text'][:70]!r}")
-
-        # Embed in batches
+            print(f"  page={c['page']} text={c['text'][:80]!r}")
+ 
+        # ── Embed in batches of 32 ──
         texts       = [c["text"] for c in unique]
-        all_vectors = []
+        all_vectors: list[list[float]] = []
         for i in range(0, len(texts), 32):
             vecs = await embed_texts(texts[i:i + 32])
             all_vectors.extend(vecs)
-
+ 
+        # ── Build rows for Supabase ──
         rows = [
             {
                 "org_id":     org_id,
@@ -440,13 +470,18 @@ async def ingest_document(
                     "doc_name":    filename,
                     "char_count":  len(unique[i]["text"]),
                     "section":     f"Page {unique[i]['page']}",
-                }
+                },
             }
             for i in range(len(unique))
         ]
-
+ 
         await db_insert("documents", rows)
-        return {"message": "Ingested successfully", "chunks_stored": len(rows), "doc_name": filename}
-
+ 
+        return {
+            "message":       "Ingested successfully",
+            "chunks_stored": len(rows),
+            "doc_name":      filename,
+        }
+ 
     finally:
         os.unlink(tmp_path)

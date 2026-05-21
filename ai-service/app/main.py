@@ -7,21 +7,18 @@ from typing import Optional
 import json
 import httpx
 import asyncio
-import re
 from app.auth import verify_token
 from app.ingest import ingest_document
 from app.query import (
+    embed_query,
+    extract_keywords,
+    filter_junk_chunks,
+    deduplicate_chunks,
+    rerank,
+    build_context,
+    RAG_PROMPT,
     answer_question,
     hybrid_retrieve,
-    rerank,
-    filter_junk_chunks,
-    compress_context,
-    get_embedder,
-    extract_keywords,
-    deduplicate_chunks,
-    build_context,
-    embed_query,
-    RAG_PROMPT,
 )
 from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.db import db_insert, db_rpc, db_keyword_search, db_test, HEADERS, BASE
@@ -32,7 +29,7 @@ from app.config import settings
 # App + CORS
 # ──────────────────────────────────────────────
 
-app = FastAPI(title="SecureStream AI Service", version="2.0.0")
+app = FastAPI(title="SecureStream AI Service", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +57,16 @@ class AnnotationUpdate(BaseModel):
 
 
 # ──────────────────────────────────────────────
+# Health
+# ──────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    db_ok = await db_test()
+    return {"status": "ok", "db": "connected" if db_ok else "error"}
+
+
+# ──────────────────────────────────────────────
 # Annotations
 # ──────────────────────────────────────────────
 
@@ -70,7 +77,6 @@ async def create_annotation(
 ):
     org_id     = claims.get("sub")
     user_email = claims.get("email", "unknown")
-
     rows = await db_insert("annotations", [{
         "org_id":        org_id,
         "doc_name":      body.doc_name,
@@ -90,7 +96,6 @@ async def get_annotations(
 ):
     org_id     = claims.get("sub")
     user_email = claims.get("email", "unknown")
-
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/annotations",
@@ -123,29 +128,18 @@ async def update_annotation(
 
 
 # ──────────────────────────────────────────────
-# Health
-# ──────────────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    db_ok = await db_test()
-    return {"status": "ok", "db": "connected" if db_ok else "error"}
-
-
-# ──────────────────────────────────────────────
 # Ingest
 # ──────────────────────────────────────────────
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
-    file:      UploadFile = File(...),
-    claims:    dict       = Depends(verify_token),
-    x_domain:  str        = Header(default="general"),
+    file:     UploadFile = File(...),
+    claims:   dict       = Depends(verify_token),
+    x_domain: str        = Header(default="general"),
 ):
     org_id = claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
-
     file_bytes = await file.read()
     return await ingest_document(file_bytes, file.filename, org_id, domain=x_domain)
 
@@ -157,55 +151,60 @@ async def ingest(
 @app.post("/query/stream")
 async def query_stream(
     body:   QueryRequest,
-    claims: dict = Depends(verify_token)
+    claims: dict = Depends(verify_token),
 ):
     org_id = claims.get("custom:org_id") or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
-    # ── Embed question ──
+    # ── 1. Embed question with retrieval.query task ──
     query_vector = await embed_query(body.question)
     keywords     = extract_keywords(body.question)
 
-    # ── Vector search ──
+    # ── 2. Vector + keyword search in parallel ──
     async def vs():
         return await db_rpc("match_documents", {
             "query_embedding": query_vector,
             "match_count":     20,
             "filter_org_id":   org_id,
-            "filter_doc_name": body.doc_name or ""
+            "filter_doc_name": body.doc_name or "",
         })
 
-    # ── Keyword search ──
     async def ks():
         results = []
-        tasks   = [db_keyword_search(org_id, kw, doc_name=body.doc_name) for kw in keywords[:4]]
+        tasks   = [
+            db_keyword_search(org_id, kw, doc_name=body.doc_name)
+            for kw in keywords[:4]
+        ]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         for b in batches:
             if isinstance(b, list):
                 results.extend(b)
         return results
 
-    vec, kw  = await asyncio.gather(vs(), ks())
+    vec, kw = await asyncio.gather(vs(), ks())
+
+    # ── 3. Merge, deduplicate, rerank ──
     combined = filter_junk_chunks(deduplicate_chunks(kw + vec))
     combined = rerank(body.question, combined)
     combined = combined[:body.top_k]
 
     # Debug log
+    print(f"QUERY: {body.question!r} | retrieved {len(combined)} chunks")
     for i, c in enumerate(combined):
         print(
-            f"FINAL[{i}] page={c.get('metadata', {}).get('page_number')} "
-            f"section={c.get('metadata', {}).get('section', '')[:40]} "
+            f"  [{i}] page={c.get('metadata', {}).get('page_number')} "
             f"sim={c.get('similarity', 0):.3f} "
-            f"text={c.get('chunk_text', '')[:60]!r}"
+            f"text={c.get('chunk_text', '')[:70]!r}"
         )
 
     if not combined:
         async def empty():
-            yield f"data: {json.dumps({'token': 'No relevant documents found.', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'token': 'No relevant content found.', 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
         return StreamingResponse(empty(), media_type="text/event-stream")
 
+    # ── 4. Build context + prompt ──
     context = build_context(combined)
     prompt  = RAG_PROMPT.format(context=context, question=body.question)
 
@@ -220,6 +219,7 @@ async def query_stream(
         for c in combined
     ]
 
+    # ── 5. Stream from Groq ──
     async def stream_groq():
         async with httpx.AsyncClient(timeout=30) as client:
             async with client.stream(
@@ -227,15 +227,15 @@ async def query_stream(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.groq_api_key}",
-                    "Content-Type": "application/json"
+                    "Content-Type":  "application/json",
                 },
                 json={
                     "model":       "llama-3.1-8b-instant",
                     "temperature": 0.1,
                     "max_tokens":  600,
                     "stream":      True,
-                    "messages":    [{"role": "user", "content": prompt}]
-                }
+                    "messages":    [{"role": "user", "content": prompt}],
+                },
             ) as resp:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]":
@@ -253,7 +253,7 @@ async def query_stream(
     return StreamingResponse(
         stream_groq(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -264,7 +264,6 @@ async def query_stream(
 @app.get("/documents")
 async def list_documents(claims: dict = Depends(verify_token)):
     org_id = claims.get("custom:org_id") or claims.get("sub")
-
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",
@@ -305,7 +304,6 @@ async def get_document_text(
     claims:   dict = Depends(verify_token),
 ):
     org_id = claims.get("custom:org_id") or claims.get("sub")
-
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",
@@ -323,5 +321,4 @@ async def get_document_text(
         key=lambda x: (x.get("metadata") or {}).get("chunk_index", 0),
     )
     full_text = " ".join(c.get("chunk_text", "") for c in chunks_sorted)
-
     return {"doc_name": doc_name, "text": full_text, "chunk_count": len(chunks_sorted)}
