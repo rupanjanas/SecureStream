@@ -427,7 +427,7 @@ async def answer_question(
 
     return result"""
     
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from app.config import settings
 from app.db import db_rpc, db_insert
 from app.cache import get_cached, set_cached
