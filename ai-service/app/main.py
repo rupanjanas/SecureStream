@@ -188,6 +188,16 @@ async def query_stream(
     combined = filter_junk_chunks(deduplicate_chunks(kw + vec))
     combined = rerank(body.question, combined)
     combined = combined[:body.top_k]
+    print(f"QUERY: {body.question!r}")
+    print(f"KEYWORDS: {keywords}")
+    print(f"RETRIEVED: {len(vec)} vector + {len(kw)} keyword chunks")
+    print(f"AFTER FILTER+RERANK: {len(combined)} chunks")
+    for i, c in enumerate(combined):
+        print(
+            f"  [{i}] page={c.get('metadata', {}).get('page_number')} "
+            f"sim={c.get('similarity', 0):.3f} "
+            f"text={c.get('chunk_text', '')[:80]!r}"
+    )
 
     # Debug log
     print(f"QUERY: {body.question!r} | retrieved {len(combined)} chunks")
