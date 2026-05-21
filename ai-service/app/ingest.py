@@ -322,14 +322,28 @@ _splitter = SentenceSplitter(
  
 def split_page_into_chunks(page_text: str) -> list[str]:
     """
-    Use LlamaIndex SentenceSplitter to split a page's text into
-    semantically coherent chunks that respect sentence boundaries.
-    Returns a list of chunk strings.
+    Split page text into sentence-aware chunks using word count.
+    Falls back gracefully without external dependencies.
     """
-    nodes = _splitter.get_nodes_from_documents(
-        [type('Doc', (), {'text': page_text, 'get_content': lambda self, **kw: self.text, 'metadata': {}, 'id_': '0', 'excluded_embed_metadata_keys': [], 'excluded_llm_metadata_keys': [], 'metadata_seperator': '\n', 'metadata_template': '{key}: {value}', 'text_template': '{content}'})()]
-    )
-    return [n.get_content() for n in nodes if len(n.get_content().strip()) >= 60]
+    # Split on sentence boundaries first
+    sentences = re.split(r'(?<=[.!?])\s+', page_text)
+    
+    chunks  = []
+    current = ""
+    
+    for sent in sentences:
+        # ~400 words per chunk
+        if len((current + " " + sent).split()) > 400:
+            if len(current.strip()) >= 60:
+                chunks.append(current.strip())
+            current = sent
+        else:
+            current = (current + " " + sent).strip()
+    
+    if len(current.strip()) >= 60:
+        chunks.append(current.strip())
+    
+    return chunks if chunks else [page_text] if len(page_text) >= 60 else []
  
  
 # ── PDF extraction ────────────────────────────────────────────────────────────
