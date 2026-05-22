@@ -301,7 +301,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
     try {
       await askQuestionStream(
-        question,
+        question,tokenRef.current || "dev-token",
+        docName,
         (token) => {
           setMessages((m) => {
             const updated = [...m];
