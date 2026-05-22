@@ -83,7 +83,8 @@ async def query_stream(
                 if token is None: # Termination signal captured safely
                     token_communication_queue.task_done()
                     break
-                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                # FIX: Use normal string concatenation with json.dumps instead of an inline f-string backslash
+                yield "data: " + json.dumps({'token': token, 'done': False}) + "\n\n"
                 token_communication_queue.task_done()
             
             # Wait for graph processing optimization components to wrap evaluation calculations
@@ -91,13 +92,15 @@ async def query_stream(
             combined_chunks = final_graph_context.get("combined_results", [])
             
             if not combined_chunks:
-                yield f"data: {json.dumps({'token': 'No relevant content found.', 'done': False})}\n\n"
-                yield f"data: {json.dumps({'done': True, 'sources': [], 'source_passages': []})}\n\n"
+                yield "data: " + json.dumps({'token': 'No relevant content found.', 'done': False}) + "\n\n"
+                yield "data: " + json.dumps({'done': True, 'sources': [], 'source_passages': []}) + "\n\n"
                 return
 
             # Apply final grounding modifications dynamically if hallucinations are detected
             if not final_graph_context.get("grounded", True):
-                yield f"data: {json.dumps({'token': '\n[Validation Warning: Generation detached from reference context]', 'done': False})}\n\n"
+                # FIX: Backslash-safe syntax for the warning token
+                warning_payload = {'token': '\n[Validation Warning: Generation detached from reference context]', 'done': False}
+                yield "data: " + json.dumps(warning_payload) + "\n\n"
 
             source_passages = [
                 {
@@ -112,10 +115,12 @@ async def query_stream(
             sources_summary = [c.get("chunk_text", "")[:200] + "..." for c in combined_chunks]
 
             # Dispatch final SSE metadata payload closure packet
-            yield f"data: {json.dumps({'done': True, 'sources': sources_summary, 'source_passages': source_passages})}\n\n"
+            final_payload = {'done': True, 'sources': sources_summary, 'source_passages': source_passages}
+            yield "data: " + json.dumps(final_payload) + "\n\n"
             
         except Exception as e:
-            yield f"data: {json.dumps({'token': f'\nStream execution fault: {str(e)}', 'done': True})}\n\n"
+            error_payload = {'token': f'\nStream execution fault: {str(e)}', 'done': True}
+            yield "data: " + json.dumps(error_payload) + "\n\n"
             if not graph_task.done():
                 graph_task.cancel()
 
