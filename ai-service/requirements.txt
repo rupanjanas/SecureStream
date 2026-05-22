@@ -17,5 +17,6 @@ python-jose[cryptography]==3.3.0
 python-dotenv==1.0.1
 pydantic-settings==2.3.4
 langchain-core==0.2.10
+langgraph>=0.0.10
 # Cache
 redis==5.0.4
