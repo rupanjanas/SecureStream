@@ -151,21 +151,30 @@ retrieval_flow.add_node("merge_rerank", merge_rerank_node)
 retrieval_flow.add_node("generate", generate_stream_node)
 retrieval_flow.add_node("grounding_check", grounding_check_node)
 
-# ─── ENTRY ───────────────────────────────────────────────────────────
+# ─── ROUTING ARCHITECTURE ──────────────────────────────────────────────────
+
 retrieval_flow.set_entry_point("analyze")
 retrieval_flow.add_edge("analyze", "embed")
 
-# ─── CORRECT FAN-OUT PARALLEL BRANCHING ──────────────────────────────
-# Defining the same source node multiple times creates a parallel split
-retrieval_flow.add_edge("embed", "vector_search")
-retrieval_flow.add_edge("embed", "keyword_search")
+# FIX: Use a routing function to split into parallel tracks safely
+def parallel_search_router(state: RetrievalState) -> List[str]:
+    # Returns both targets to execute them concurrently
+    return ["vector_search", "keyword_search"]
 
-# ─── FAN-IN CONCURRENT AGGREGATION ───────────────────────────────────
-# Pointing both back to merge_rerank automatically synchronizes them
+# Register the conditional fork pathway directly out of 'embed'
+retrieval_flow.add_conditional_edges(
+    "embed",
+    parallel_search_router,
+    {
+        "vector_search": "vector_search",
+        "keyword_search": "keyword_search"
+    }
+)
+
+# Funnel the concurrent channels back into your aggregation hub
 retrieval_flow.add_edge("vector_search", "merge_rerank")
 retrieval_flow.add_edge("keyword_search", "merge_rerank")
 
-# ─── EXIT PIPELINE ───────────────────────────────────────────────────
 retrieval_flow.add_edge("merge_rerank", "generate")
 retrieval_flow.add_edge("generate", "grounding_check")
 retrieval_flow.add_edge("grounding_check", END)
