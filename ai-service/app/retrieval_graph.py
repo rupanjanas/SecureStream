@@ -151,17 +151,21 @@ retrieval_flow.add_node("merge_rerank", merge_rerank_node)
 retrieval_flow.add_node("generate", generate_stream_node)
 retrieval_flow.add_node("grounding_check", grounding_check_node)
 
-# ─── FIXED GRAPH CONNECTIONS ──────────────────────────────────────────────
+# ─── ENTRY ───────────────────────────────────────────────────────────
 retrieval_flow.set_entry_point("analyze")
 retrieval_flow.add_edge("analyze", "embed")
 
-# This is how you correctly branch to parallel nodes in LangGraph:
-retrieval_flow.add_edge("embed", ["vector_search", "keyword_search"])
+# ─── CORRECT FAN-OUT PARALLEL BRANCHING ──────────────────────────────
+# Defining the same source node multiple times creates a parallel split
+retrieval_flow.add_edge("embed", "vector_search")
+retrieval_flow.add_edge("embed", "keyword_search")
 
-# Map parallel paths back into your unified sync aggregation point
+# ─── FAN-IN CONCURRENT AGGREGATION ───────────────────────────────────
+# Pointing both back to merge_rerank automatically synchronizes them
 retrieval_flow.add_edge("vector_search", "merge_rerank")
 retrieval_flow.add_edge("keyword_search", "merge_rerank")
 
+# ─── EXIT PIPELINE ───────────────────────────────────────────────────
 retrieval_flow.add_edge("merge_rerank", "generate")
 retrieval_flow.add_edge("generate", "grounding_check")
 retrieval_flow.add_edge("grounding_check", END)
