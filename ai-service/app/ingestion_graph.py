@@ -51,7 +51,7 @@ async def extract_node(state: IngestionState) -> Dict[str, Any]:
 async def validate_node(state: IngestionState) -> Dict[str, Any]:
     errors = list(state.get("errors", []))
     if errors:
-        return {}
+        return {"errors": errors} # FIXED: Do not return {}
         
     total_words = sum(len(p["text"].split()) for p in state["raw_pages"])
     if total_words < 50:
@@ -60,14 +60,17 @@ async def validate_node(state: IngestionState) -> Dict[str, Any]:
     return {"errors": errors}
 
 async def chunk_node(state: IngestionState) -> Dict[str, Any]:
-    if state.get("errors"):
-        return {}
+    errors = list(state.get("errors", []))
+    if errors:
+        return {"errors": errors} # FIXED: Do not return {}
+        
     chunks = process_and_chunk_document(state["raw_pages"], state["filename"])
     return {"chunks": chunks}
 
 async def embed_node(state: IngestionState) -> Dict[str, Any]:
-    if state.get("errors") or not state["chunks"]:
-        return {}
+    errors = list(state.get("errors", []))
+    if errors or not state.get("chunks"):
+        return {"errors": errors} # FIXED: Do not return {}
         
     texts = [c["text"] for c in state["chunks"]]
     all_vectors = []
@@ -88,14 +91,17 @@ async def embed_node(state: IngestionState) -> Dict[str, Any]:
                 },
             )
             if r.status_code != 200:
-                return {"errors": state.get("errors", []) + [f"Jina Embed Error: {r.text}"]}
+                errors.append(f"Jina Embed Error: {r.text}")
+                return {"errors": errors} # FIXED: Return valid error tracking state block
+                
             all_vectors.extend([item["embedding"] for item in r.json()["data"]])
             
     return {"embeddings": all_vectors}
 
 async def store_node(state: IngestionState) -> Dict[str, Any]:
-    if state.get("errors") or not state["chunks"]:
-        return {}
+    errors = list(state.get("errors", []))
+    if errors or not state.get("chunks") or not state.get("embeddings"):
+        return {"errors": errors} # FIXED: Do not return {}
         
     rows = [
         {
@@ -115,11 +121,12 @@ async def store_node(state: IngestionState) -> Dict[str, Any]:
         for i in range(len(state["chunks"]))
     ]
     await db_insert("documents", rows)
-    return {}
+    return {"errors": errors} # FIXED: Return standard errors tracking context list rather than empty dict
 
 def routing_decision(state: IngestionState) -> str:
     return "failed" if state.get("errors") else "continue"
 
+# ─── GRAPH ARCHITECTURE DEFINITION ──────────────────────────────────────────
 workflow = StateGraph(IngestionState)
 workflow.add_node("extract", extract_node)
 workflow.add_node("validate", validate_node)
