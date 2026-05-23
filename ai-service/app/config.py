@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     groq_api_key: str
     jina_api_key: str
     redis_url: str = "redis://red-d7tiup1j2pic73ac0cl0:6379"
-    environment: str = "dev"
+    environment: str = "production"
     cognito_jwks_url: Optional[str] = None
 
     # ─── Shared RAG & Hyperparameters ─────────────────────────────────────────

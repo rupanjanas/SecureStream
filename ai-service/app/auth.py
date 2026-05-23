@@ -22,44 +22,37 @@ async def get_jwks():
 async def verify_token(
     credentials: HTTPAuthorizationCredentials = Security(bearer)
 ):
-    # ✅ DEV MODE (safe check)
-    if settings.environment == "dev":
+    # Dev mode — only when explicitly set AND no real token provided
+    if settings.environment == "dev" and (
+        not credentials or credentials.credentials == "dev-token"
+    ):
         return {
-            "sub": "dev-user-001",
+            "sub":   "dev-user-001",
             "email": "dev@securestream.local"
         }
 
-    # ❌ No token
+    # No token in production
     if not credentials:
         raise HTTPException(status_code=401, detail="No token provided")
 
     token = credentials.credentials
 
-    # ✅ Dev token shortcut
-    if token == "dev-token":
-        return {
-            "sub": "dev-user-001",
-            "email": "dev@securestream.local"
-        }
-
     try:
-        keys = await get_jwks()
+        keys  = await get_jwks()
         header = jwt.get_unverified_header(token)
+        key    = next((k for k in keys if k["kid"] == header["kid"]), None)
 
-        key = next((k for k in keys if k["kid"] == header["kid"]), None)
         if not key:
             raise Exception("Matching JWKS key not found")
 
         public_key = jwk.construct(key)
-
-        claims = jwt.decode(
+        claims     = jwt.decode(
             token,
             public_key,
             algorithms=["RS256"],
             options={"verify_aud": False, "verify_at_hash": False}
         )
 
-        # ✅ IMPORTANT: ensure access_token
         if claims.get("token_use") != "access":
             raise Exception("Invalid token type")
 
