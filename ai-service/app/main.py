@@ -9,6 +9,7 @@ from app.auth import verify_token
 from app.models import IngestResponse, QueryRequest
 from app.config import settings
 from app.db import db_rpc, db_select_or_rpc
+import uuid
 
 # Import Compiled Graph Lifecycles
 from app.ingestion_graph import ingestion_graph
@@ -235,17 +236,21 @@ async def query_stream(
 ):
     org_id = claims.get("custom:org_id") or claims.get("sub")
     if not org_id:
-        raise HTTPException(status_code=400, detail="Missing valid organization context parameters.")
-
-    print(f"\n[SSE] /query/stream called — question={body.question!r} org_id={org_id} doc_name={body.doc_name!r}")
-
+        raise HTTPException(status_code=400, detail="Missing org_id in token.")
+ 
+    print(f"\n[SSE] /query/stream — question={body.question!r} org_id={org_id} doc_name={body.doc_name!r}")
+ 
+    # Register queue by ID — avoids passing non-serializable Queue through LangGraph state
+    from app.retrieval_graph import _QUEUE_REGISTRY
+    queue_id    = str(uuid.uuid4())
     token_queue = asyncio.Queue()
-
+    _QUEUE_REGISTRY[queue_id] = token_queue
+ 
     initial_state = {
         "question":         body.question,
         "org_id":           org_id,
-        "doc_name":         body.doc_name,
-        "token_queue":      token_queue,
+        "doc_name":         body.doc_name,       # may be None — handled in graph
+        "queue_id":         queue_id,            # string key, not the Queue
         "strategy":         {},
         "query_vector":     [],
         "keywords":         [],
@@ -256,20 +261,15 @@ async def query_stream(
         "generation":       "",
         "grounded":         False,
     }
-
-    # ── Run graph in background, catch startup import/init errors immediately ──
+ 
     try:
         graph_task = asyncio.create_task(retrieval_graph.ainvoke(initial_state))
-        # temporary — remove after confirming
-        await asyncio.sleep(2)
-        print(f"[SSE] graph_task state: done={graph_task.done()} cancelled={graph_task.cancelled()}")
-        if graph_task.done():
-            print(f"[SSE] graph_task exception: {graph_task.exception()}")
     except Exception as e:
+        _QUEUE_REGISTRY.pop(queue_id, None)
         import traceback
-        print(f"[SSE] Failed to create graph task:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Graph init failed: {e}")
-
+        print(f"[SSE] Graph task creation failed:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Graph init error: {e}")
+ 
     async def sse_generator():
         try:
             while True:
@@ -279,51 +279,51 @@ async def query_stream(
                     if graph_task.done():
                         try:
                             exc = graph_task.exception()
-                            err_msg = f"Graph failed: {type(exc).__name__}: {exc}" if exc else "Graph done but no output"
-                        except Exception as meta_e:
-                            err_msg = f"Graph state unknown: {meta_e}"
+                            err_msg = f"Graph error: {type(exc).__name__}: {exc}"
+                        except Exception as me:
+                            err_msg = f"Graph state unknown: {me}"
                     else:
                         graph_task.cancel()
-                        err_msg = "Graph timed out after 30s — check Render logs for last [RETRIEVAL] line"
+                        err_msg = "Timed out — check logs for last [RETRIEVAL]/[EMBED]/[VECTOR] line"
                     print(f"[SSE] TIMEOUT — {err_msg}")
+                    _QUEUE_REGISTRY.pop(queue_id, None)
                     yield "data: " + json.dumps({"token": f"\n[Error: {err_msg}]", "done": True}) + "\n\n"
                     return
-
+ 
                 if token is None:
                     token_queue.task_done()
                     break
-
+ 
                 yield "data: " + json.dumps({"token": token, "done": False}) + "\n\n"
                 token_queue.task_done()
-
-            # ── Collect final state ──
+ 
             try:
                 final_state = await graph_task
-                print(f"[SSE] Graph completed — grounded={final_state.get('grounded')} "
+                print(f"[SSE] Done — grounded={final_state.get('grounded')} "
                       f"chunks={len(final_state.get('combined_results', []))}")
             except Exception as e:
                 import traceback
-                print(f"[SSE] Graph task exception:\n{traceback.format_exc()}")
+                print(f"[SSE] Graph exception:\n{traceback.format_exc()}")
+                _QUEUE_REGISTRY.pop(queue_id, None)
                 yield "data: " + json.dumps({
                     "token": f"\n[Pipeline error: {type(e).__name__}: {e}]",
-                    "done": True
+                    "done":  True,
                 }) + "\n\n"
                 return
-
+ 
             combined_chunks = final_state.get("combined_results", [])
-
             if not combined_chunks:
-                print(f"[SSE] No combined_results in final state")
+                print(f"[SSE] No chunks in final state")
                 yield "data: " + json.dumps({"token": "No relevant content found.", "done": False}) + "\n\n"
                 yield "data: " + json.dumps({"done": True, "sources": [], "source_passages": []}) + "\n\n"
                 return
-
+ 
             if not final_state.get("grounded", True):
                 yield "data: " + json.dumps({
                     "token": "\n[Warning: answer may not be grounded in the document]",
-                    "done": False,
+                    "done":  False,
                 }) + "\n\n"
-
+ 
             source_passages = [
                 {
                     "doc_name":    c.get("doc_name"),
@@ -334,23 +334,24 @@ async def query_stream(
                 }
                 for c in combined_chunks
             ]
-
+ 
             yield "data: " + json.dumps({
                 "done":            True,
                 "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined_chunks],
                 "source_passages": source_passages,
             }) + "\n\n"
-
+ 
         except Exception as e:
             import traceback
-            print(f"[SSE] Outer generator exception:\n{traceback.format_exc()}")
+            print(f"[SSE] Outer exception:\n{traceback.format_exc()}")
+            _QUEUE_REGISTRY.pop(queue_id, None)
             yield "data: " + json.dumps({
                 "token": f"\n[Stream error: {type(e).__name__}: {e}]",
-                "done": True
+                "done":  True,
             }) + "\n\n"
             if not graph_task.done():
                 graph_task.cancel()
-
+ 
     return StreamingResponse(
         sse_generator(),
         media_type="text/event-stream",

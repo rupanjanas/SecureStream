@@ -427,140 +427,305 @@ async def answer_question(
 
     return result"""
     
-# Full replacement for query_stream in main.py
-# Uses queue_id string instead of passing Queue through LangGraph state
-
-import uuid  # add to top-level imports in main.py
-
-@app.post("/query/stream", tags=["Retrieval"])
-async def query_stream(
-    body: QueryRequest,
-    claims: dict = Depends(verify_token),
-):
-    org_id = claims.get("custom:org_id") or claims.get("sub")
-    if not org_id:
-        raise HTTPException(status_code=400, detail="Missing org_id in token.")
-
-    print(f"\n[SSE] /query/stream — question={body.question!r} org_id={org_id} doc_name={body.doc_name!r}")
-
-    # Register queue by ID — avoids passing non-serializable Queue through LangGraph state
-    from app.retrieval_graph import _QUEUE_REGISTRY
-    queue_id    = str(uuid.uuid4())
-    token_queue = asyncio.Queue()
-    _QUEUE_REGISTRY[queue_id] = token_queue
-
-    initial_state = {
-        "question":         body.question,
-        "org_id":           org_id,
-        "doc_name":         body.doc_name,       # may be None — handled in graph
-        "queue_id":         queue_id,            # string key, not the Queue
-        "strategy":         {},
-        "query_vector":     [],
-        "keywords":         [],
-        "vector_results":   [],
-        "keyword_results":  [],
-        "combined_results": [],
-        "context":          "",
-        "generation":       "",
-        "grounded":         False,
+from langchain_core.prompts import PromptTemplate
+from app.config import settings
+from app.db import db_rpc, db_insert
+from app.cache import get_cached, set_cached
+import asyncio, re, httpx
+ 
+ 
+# ── Stop words ────────────────────────────────────────────────────────────────
+ 
+STOP_WORDS = {
+    "what", "is", "the", "a", "an", "of", "in", "on", "at", "to", "for",
+    "and", "or", "are", "was", "were", "has", "have", "does", "do", "did",
+    "this", "that", "with", "from", "by", "about", "how", "when", "where",
+    "who", "which", "can", "will", "there", "any", "all", "tell", "me",
+    "show", "give", "find", "list", "please", "could", "would", "should",
+    "its", "it", "be", "been", "being", "get", "got", "just", "also",
+    "section", "page", "document", "text", "content",
+}
+ 
+# ── RAG prompt ────────────────────────────────────────────────────────────────
+ 
+RAG_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""You are a helpful document assistant. Answer the question using ONLY the context below.
+ 
+Rules:
+- Summarize and paraphrase clearly. You do not need to quote verbatim.
+- If the context contains relevant information, always use it — even if partial.
+- Only say "Not found in the uploaded document." if there is truly NO relevant information at all.
+- Never make up information not in the context.
+- Never reference URLs or bibliography entries.
+ 
+Context:
+{context}
+ 
+Question: {question}
+ 
+Answer:"""
+)
+ 
+ 
+# ── Jina query embedder ───────────────────────────────────────────────────────
+ 
+async def embed_query(question: str) -> list[float]:
+    """
+    Embed a query using retrieval.query task.
+    MUST be different from embed_texts which uses retrieval.passage —
+    Jina v3 is asymmetric and this separation is critical for good similarity scores.
+    """
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "input": [question],
+                "model": "jina-embeddings-v3",
+                "task":  "retrieval.query",
+            },
+        )
+        r.raise_for_status()
+        return r.json()["data"][0]["embedding"]
+ 
+ 
+# ── Groq ──────────────────────────────────────────────────────────────────────
+ 
+async def ask_groq(prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":       "llama-3.1-8b-instant",
+                "temperature": 0.1,
+                "max_tokens":  600,
+                "messages":    [{"role": "user", "content": prompt}],
+            },
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+ 
+ 
+# ── Keyword extraction ────────────────────────────────────────────────────────
+ 
+def extract_keywords(question: str) -> list[str]:
+    words    = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
+    keywords = [w for w in words if w not in STOP_WORDS]
+    # Add stems for longer words to catch morphological variants
+    stems    = [w[:5] for w in keywords if len(w) >= 7]
+    return list(dict.fromkeys(keywords + stems))[:8]
+ 
+ 
+# ── Junk filter ───────────────────────────────────────────────────────────────
+ 
+_JUNK_RE = re.compile(r'(https?://|www\.|doi\.org)', re.IGNORECASE)
+ 
+def filter_junk(chunks: list[dict]) -> list[dict]:
+    result = []
+    for c in chunks:
+        text      = c.get("chunk_text", "")
+        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        if not sentences:
+            continue
+        junk = sum(1 for s in sentences if _JUNK_RE.search(s))
+        if junk / len(sentences) <= 0.5:
+            result.append(c)
+    return result
+ 
+ 
+# ── Deduplication ─────────────────────────────────────────────────────────────
+ 
+def deduplicate(chunks: list[dict]) -> list[dict]:
+    seen = []
+    for c in chunks:
+        text   = c.get("chunk_text", "").lower().strip()
+        is_dup = False
+        for s in seen:
+            s_text = s.get("chunk_text", "").lower().strip()
+            if text in s_text or s_text in text:
+                is_dup = True
+                break
+            set_a = set(text.split())
+            set_b = set(s_text.split())
+            union = len(set_a | set_b)
+            if union > 0 and len(set_a & set_b) / union > 0.82:
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append(c)
+    return seen
+ 
+ 
+# ── Reranker ──────────────────────────────────────────────────────────────────
+ 
+def rerank(question: str, chunks: list[dict]) -> list[dict]:
+    """
+    Score = 0.8 × vector_similarity + 0.2 × keyword_overlap
+    Vector similarity dominates so keyword false-positives can't override
+    genuinely relevant chunks. No section boost — sections are now just
+    'Page N' so boosting them would be meaningless.
+    """
+    q_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
+ 
+    def score(chunk: dict) -> float:
+        text        = chunk.get("chunk_text", "").lower()
+        c_words     = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+        overlap     = len(q_words & c_words) / max(len(q_words), 1)
+        similarity  = chunk.get("similarity", 0.0)
+        return 0.8 * similarity + 0.2 * overlap
+ 
+    return sorted(chunks, key=score, reverse=True)
+ 
+ 
+# ── Context builder ───────────────────────────────────────────────────────────
+ 
+def build_context(chunks: list[dict], max_words: int = 1200) -> str:
+    parts      = []
+    word_count = 0
+ 
+    for c in chunks:
+        text  = c.get("chunk_text", "")
+        page  = (c.get("metadata") or {}).get("page_number", "?")
+        words = text.split()
+ 
+        if word_count + len(words) > max_words:
+            remaining = max_words - word_count
+            if remaining > 30:
+                parts.append(f"[Page {page}]\n" + " ".join(words[:remaining]) + "…")
+            break
+ 
+        parts.append(f"[Page {page}]\n{text}")
+        word_count += len(words)
+ 
+    return "\n\n".join(parts)
+ 
+ 
+# ── Exported helpers (used by main.py) ────────────────────────────────────────
+ 
+def get_embedder():
+    return embed_texts
+ 
+def compress_context(chunks, max_tokens=1500):
+    return chunks
+ 
+def group_by_section(chunks):
+    return build_context(chunks)
+ 
+def filter_junk_chunks(chunks):
+    return filter_junk(chunks)
+ 
+def deduplicate_chunks(chunks):
+    return deduplicate(chunks)
+ 
+ 
+# ── Full answer pipeline (non-streaming) ─────────────────────────────────────
+ 
+async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
+    cached = await get_cached(org_id, question)
+    if cached:
+        print(f"Cache HIT org={org_id}")
+        return cached
+ 
+    query_vector = await embed_query(question)
+    keywords     = extract_keywords(question)
+ 
+    async def vector_search():
+        return await db_rpc("match_documents", {
+            "query_embedding": query_vector,
+            "match_count":     20,
+            "filter_org_id":   org_id,
+        })
+ 
+    async def keyword_search():
+        from app.db import db_keyword_search
+        results = []
+        batches = await asyncio.gather(
+            *[db_keyword_search(org_id, kw) for kw in keywords[:4]],
+            return_exceptions=True,
+        )
+        for b in batches:
+            if isinstance(b, list):
+                results.extend(b)
+        return results
+ 
+    vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
+    combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+    combined = rerank(question, combined)[:top_k]
+ 
+    if not combined:
+        return {
+            "answer":          "No relevant documents found.",
+            "sources":         [],
+            "source_passages": [],
+            "org_id":          org_id,
+        }
+ 
+    context = build_context(combined)
+    prompt  = RAG_PROMPT.format(context=context, question=question)
+    answer  = await ask_groq(prompt)
+ 
+    source_passages = [
+        {
+            "doc_name":    c["doc_name"],
+            "passage":     c["chunk_text"],
+            "similarity":  round(c.get("similarity", 0), 3),
+            "section":     (c.get("metadata") or {}).get("section", ""),
+            "page_number": (c.get("metadata") or {}).get("page_number", 1),
+        }
+        for c in combined
+    ]
+ 
+    result = {
+        "answer":          answer,
+        "sources":         [c["chunk_text"][:200] + "..." for c in combined],
+        "source_passages": source_passages,
+        "org_id":          org_id,
     }
-
-    try:
-        graph_task = asyncio.create_task(retrieval_graph.ainvoke(initial_state))
-    except Exception as e:
-        _QUEUE_REGISTRY.pop(queue_id, None)
-        import traceback
-        print(f"[SSE] Graph task creation failed:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Graph init error: {e}")
-
-    async def sse_generator():
-        try:
-            while True:
-                try:
-                    token = await asyncio.wait_for(token_queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    if graph_task.done():
-                        try:
-                            exc = graph_task.exception()
-                            err_msg = f"Graph error: {type(exc).__name__}: {exc}"
-                        except Exception as me:
-                            err_msg = f"Graph state unknown: {me}"
-                    else:
-                        graph_task.cancel()
-                        err_msg = "Timed out — check logs for last [RETRIEVAL]/[EMBED]/[VECTOR] line"
-                    print(f"[SSE] TIMEOUT — {err_msg}")
-                    _QUEUE_REGISTRY.pop(queue_id, None)
-                    yield "data: " + json.dumps({"token": f"\n[Error: {err_msg}]", "done": True}) + "\n\n"
-                    return
-
-                if token is None:
-                    token_queue.task_done()
-                    break
-
-                yield "data: " + json.dumps({"token": token, "done": False}) + "\n\n"
-                token_queue.task_done()
-
-            try:
-                final_state = await graph_task
-                print(f"[SSE] Done — grounded={final_state.get('grounded')} "
-                      f"chunks={len(final_state.get('combined_results', []))}")
-            except Exception as e:
-                import traceback
-                print(f"[SSE] Graph exception:\n{traceback.format_exc()}")
-                _QUEUE_REGISTRY.pop(queue_id, None)
-                yield "data: " + json.dumps({
-                    "token": f"\n[Pipeline error: {type(e).__name__}: {e}]",
-                    "done":  True,
-                }) + "\n\n"
-                return
-
-            combined_chunks = final_state.get("combined_results", [])
-            if not combined_chunks:
-                print(f"[SSE] No chunks in final state")
-                yield "data: " + json.dumps({"token": "No relevant content found.", "done": False}) + "\n\n"
-                yield "data: " + json.dumps({"done": True, "sources": [], "source_passages": []}) + "\n\n"
-                return
-
-            if not final_state.get("grounded", True):
-                yield "data: " + json.dumps({
-                    "token": "\n[Warning: answer may not be grounded in the document]",
-                    "done":  False,
-                }) + "\n\n"
-
-            source_passages = [
-                {
-                    "doc_name":    c.get("doc_name"),
-                    "passage":     c.get("chunk_text"),
-                    "similarity":  round(c.get("similarity", 0), 3),
-                    "section":     (c.get("metadata") or {}).get("section", ""),
-                    "page_number": (c.get("metadata") or {}).get("page_number", 1),
-                }
-                for c in combined_chunks
-            ]
-
-            yield "data: " + json.dumps({
-                "done":            True,
-                "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined_chunks],
-                "source_passages": source_passages,
-            }) + "\n\n"
-
-        except Exception as e:
-            import traceback
-            print(f"[SSE] Outer exception:\n{traceback.format_exc()}")
-            _QUEUE_REGISTRY.pop(queue_id, None)
-            yield "data: " + json.dumps({
-                "token": f"\n[Stream error: {type(e).__name__}: {e}]",
-                "done":  True,
-            }) + "\n\n"
-            if not graph_task.done():
-                graph_task.cancel()
-
-    return StreamingResponse(
-        sse_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
-    )
+ 
+    await set_cached(org_id, question, result, ttl=300)
+    asyncio.create_task(db_insert("query_logs", [{
+        "org_id":   org_id,
+        "question": question,
+        "answer":   answer,
+    }]))
+ 
+    return result
+ 
+ 
+# ── Hybrid retrieve ───────────────────────────────────────────────────────────
+ 
+async def hybrid_retrieve(question: str, org_id: str, top_k: int = 5) -> list[dict]:
+    from app.db import db_keyword_search
+ 
+    query_vector = await embed_query(question)
+    keywords     = extract_keywords(question)
+ 
+    async def vector_search():
+        return await db_rpc("match_documents", {
+            "query_embedding": query_vector,
+            "match_count":     20,
+            "filter_org_id":   org_id,
+        })
+ 
+    async def keyword_search():
+        results = []
+        batches = await asyncio.gather(
+            *[db_keyword_search(org_id, kw) for kw in keywords[:4]],
+            return_exceptions=True,
+        )
+        for b in batches:
+            if isinstance(b, list):
+                results.extend(b)
+        return results
+ 
+    vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
+    combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+    return rerank(question, combined)[:top_k]
