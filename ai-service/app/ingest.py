@@ -241,12 +241,12 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
     return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
     
 import re
+import httpx
 from typing import Dict, Any, List
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core import Document
 from app.config import settings
 
-# Structured globally with unified config parameters
 _splitter = SentenceSplitter(
     chunk_size=settings.chunk_size,
     chunk_overlap=settings.chunk_overlap,
@@ -255,49 +255,69 @@ _splitter = SentenceSplitter(
 )
 
 def clean_document_text(text: str) -> str:
-    """Clean extracted text without disrupting syntactic structures."""
     text = re.sub(r'-\s*\n\s*', '', text)
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
     return text.strip()
 
+
 def process_and_chunk_document(doc_pages: List[Dict[str, Any]], filename: str) -> List[Dict[str, Any]]:
-    """
-    Accumulates page content globally to prevent awkward cuts at page seams.
-    Maps page numbers post-chunking via precise character index offsets.
-    """
+    print(f"\n{'='*60}")
+    print(f"[CHUNK] Starting chunking for: {filename!r}")
+    print(f"[CHUNK] Raw pages received: {len(doc_pages)}")
+
     full_text_segments = []
     page_offsets = []
     current_char_offset = 0
 
     for page_data in doc_pages:
-        cleaned_page = clean_document_text(page_data["text"])
-        if not cleaned_page:
+        cleaned = clean_document_text(page_data["text"])
+        word_count = len(cleaned.split())
+
+        print(f"[CHUNK] Page {page_data['page_num']}: {word_count} words after cleaning "
+              f"| preview: {cleaned[:80].replace(chr(10),' ')!r}")
+
+        if not cleaned:
+            print(f"[CHUNK] Page {page_data['page_num']}: SKIPPED (empty after clean)")
             continue
-        
+
         if full_text_segments:
             full_text_segments.append(" ")
             current_char_offset += 1
-            
+
         start_offset = current_char_offset
-        full_text_segments.append(cleaned_page)
-        current_char_offset += len(cleaned_page)
+        full_text_segments.append(cleaned)
+        current_char_offset += len(cleaned)
         end_offset = current_char_offset
-        
+
         page_offsets.append({
             "page_num": page_data["page_num"],
-            "start": start_offset,
-            "end": end_offset
+            "start":    start_offset,
+            "end":      end_offset,
         })
 
     full_document_text = "".join(full_text_segments)
+    total_words = len(full_document_text.split())
+    print(f"[CHUNK] Full document assembled: {len(full_document_text)} chars | {total_words} words")
+
     if not full_document_text.strip():
+        print(f"[CHUNK] ⚠️  Document is empty after cleaning — returning no chunks")
         return []
 
-    # Safe extraction leveraging SentenceSplitter Document context bindings
-    nodes = _splitter.get_nodes_from_documents([Document(text=full_document_text)])
-    chunks_text = [n.text for n in nodes] if nodes else _splitter.split_text(full_document_text)
-    
+    # Chunking
+    try:
+        nodes = _splitter.get_nodes_from_documents([Document(text=full_document_text)])
+        chunks_text = [n.text for n in nodes]
+        print(f"[CHUNK] SentenceSplitter produced {len(chunks_text)} chunks")
+    except Exception as e:
+        print(f"[CHUNK] SentenceSplitter failed ({e}) — falling back to split_text()")
+        chunks_text = _splitter.split_text(full_document_text)
+        print(f"[CHUNK] Fallback produced {len(chunks_text)} chunks")
+
+    if not chunks_text:
+        print(f"[CHUNK] ⚠️  Zero chunks produced — check chunk_size/overlap settings")
+        return []
+
     processed_chunks = []
     search_start_idx = 0
 
@@ -313,12 +333,18 @@ def process_and_chunk_document(doc_pages: List[Dict[str, Any]], filename: str) -
             if mapping["start"] <= char_idx <= mapping["end"]:
                 assigned_page = mapping["page_num"]
                 break
-        
+
+        chunk_words = len(chunk_text.split())
+        print(f"[CHUNK] Chunk {i:03d}: page={assigned_page} words={chunk_words} "
+              f"| {chunk_text[:80].replace(chr(10),' ')!r}")
+
         processed_chunks.append({
-            "text": chunk_text,
-            "page": assigned_page,
-            "doc_name": filename,
-            "chunk_index": i
+            "text":        chunk_text,
+            "page":        assigned_page,
+            "doc_name":    filename,
+            "chunk_index": i,
         })
 
+    print(f"[CHUNK] ✅ Done — {len(processed_chunks)} chunks ready for embedding")
+    print(f"{'='*60}\n")
     return processed_chunks
