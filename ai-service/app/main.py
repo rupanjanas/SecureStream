@@ -248,6 +248,7 @@ async def query_stream(
  
     initial_state = {
         "question":         body.question,
+        "chat_history":     body.chat_history,
         "org_id":           org_id,
         "doc_name":         body.doc_name,       # may be None — handled in graph
         "queue_id":         queue_id,            # string key, not the Queue

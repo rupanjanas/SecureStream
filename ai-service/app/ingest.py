@@ -261,90 +261,68 @@ def clean_document_text(text: str) -> str:
     return text.strip()
 
 
-def process_and_chunk_document(doc_pages: List[Dict[str, Any]], filename: str) -> List[Dict[str, Any]]:
-    print(f"\n{'='*60}")
-    print(f"[CHUNK] Starting chunking for: {filename!r}")
-    print(f"[CHUNK] Raw pages received: {len(doc_pages)}")
+def process_and_chunk_document(
+    doc_pages: List[Dict[str, Any]], filename: str
+) -> List[Dict[str, Any]]:
 
-    full_text_segments = []
+    # Build per-page segments with precise offsets
+    segments     = []
     page_offsets = []
-    current_char_offset = 0
+    offset       = 0
 
     for page_data in doc_pages:
         cleaned = clean_document_text(page_data["text"])
-        word_count = len(cleaned.split())
-
-        print(f"[CHUNK] Page {page_data['page_num']}: {word_count} words after cleaning "
-              f"| preview: {cleaned[:80].replace(chr(10),' ')!r}")
-
-        if not cleaned:
-            print(f"[CHUNK] Page {page_data['page_num']}: SKIPPED (empty after clean)")
+        if not cleaned or len(cleaned.split()) < 10:
             continue
-
-        if full_text_segments:
-            full_text_segments.append(" ")
-            current_char_offset += 1
-
-        start_offset = current_char_offset
-        full_text_segments.append(cleaned)
-        current_char_offset += len(cleaned)
-        end_offset = current_char_offset
 
         page_offsets.append({
             "page_num": page_data["page_num"],
-            "start":    start_offset,
-            "end":      end_offset,
+            "start":    offset,
+            "end":      offset + len(cleaned),
         })
+        segments.append(cleaned)
+        offset += len(cleaned) + 1  # +1 for the separator space
 
-    full_document_text = "".join(full_text_segments)
-    total_words = len(full_document_text.split())
-    print(f"[CHUNK] Full document assembled: {len(full_document_text)} chars | {total_words} words")
-
-    if not full_document_text.strip():
-        print(f"[CHUNK] ⚠️  Document is empty after cleaning — returning no chunks")
+    full_text = " ".join(segments)
+    if not full_text.strip():
         return []
 
-    # Chunking
+    # Chunk
     try:
-        nodes = _splitter.get_nodes_from_documents([Document(text=full_document_text)])
+        nodes       = _splitter.get_nodes_from_documents([Document(text=full_text)])
         chunks_text = [n.text for n in nodes]
-        print(f"[CHUNK] SentenceSplitter produced {len(chunks_text)} chunks")
     except Exception as e:
-        print(f"[CHUNK] SentenceSplitter failed ({e}) — falling back to split_text()")
-        chunks_text = _splitter.split_text(full_document_text)
-        print(f"[CHUNK] Fallback produced {len(chunks_text)} chunks")
+        print(f"[CHUNK] Splitter failed: {e}")
+        chunks_text = _splitter.split_text(full_text)
 
-    if not chunks_text:
-        print(f"[CHUNK] ⚠️  Zero chunks produced — check chunk_size/overlap settings")
-        return []
-
-    processed_chunks = []
-    search_start_idx = 0
+    # ── FIXED: track search cursor so find() is monotonic ──
+    processed = []
+    cursor     = 0
 
     for i, chunk_text in enumerate(chunks_text):
-        char_idx = full_document_text.find(chunk_text, search_start_idx)
-        if char_idx == -1:
-            char_idx = full_document_text.find(chunk_text)
-        else:
-            search_start_idx = char_idx + len(chunk_text)
+        # Search forward from cursor only — never backwards
+        pos = full_text.find(chunk_text[:40], cursor)   # use prefix for robustness
+        if pos == -1:
+            pos = cursor   # fallback: inherit previous position
 
+        cursor = pos + max(len(chunk_text) - 50, 1)    # advance with overlap tolerance
+
+        # Binary search through page_offsets for correct page
         assigned_page = 1
         for mapping in page_offsets:
-            if mapping["start"] <= char_idx <= mapping["end"]:
+            if mapping["start"] <= pos < mapping["end"]:
                 assigned_page = mapping["page_num"]
                 break
+            if mapping["start"] > pos:
+                # pos is in the gap between pages — assign to previous page
+                assigned_page = max(1, mapping["page_num"] - 1)
+                break
 
-        chunk_words = len(chunk_text.split())
-        print(f"[CHUNK] Chunk {i:03d}: page={assigned_page} words={chunk_words} "
-              f"| {chunk_text[:80].replace(chr(10),' ')!r}")
-
-        processed_chunks.append({
+        processed.append({
             "text":        chunk_text,
             "page":        assigned_page,
             "doc_name":    filename,
             "chunk_index": i,
         })
 
-    print(f"[CHUNK] ✅ Done — {len(processed_chunks)} chunks ready for embedding")
-    print(f"{'='*60}\n")
-    return processed_chunks
+    return processed

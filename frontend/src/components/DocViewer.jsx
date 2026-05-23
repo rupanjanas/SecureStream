@@ -105,7 +105,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const pdfUrlRef = useRef(null);
   const bottomRef = useRef(null);
   const tokenRef  = useRef(null);
-
+  const [chatHistory, setChatHistory] = useState([]);
   // ── PDF blob URL — created once ──
   const pdfFile = useMemo(() => {
     if (!isPDF) return null;
@@ -286,7 +286,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const send = async () => {
     const question = input.trim();
     if (!question || loading) return;
-
+    const newHistory = [...chatHistory, { role: "user", content: question }];
+    setChatHistory(newHistory);
     // Add user message, clear any stuck streaming message, add fresh assistant placeholder
     setMessages((m) => [
       ...m.filter((msg) => !msg.streaming),
@@ -303,6 +304,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
       await askQuestionStream(
         question,tokenRef.current || "dev-token",
         docName,
+        newHistory,
         (token) => {
           setMessages((m) => {
             const updated = [...m];
@@ -312,6 +314,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
           });
         },
         (sources, passages) => {
+          setChatHistory(h => [...h, {
+          role:    "assistant",
+          content: passages.length > 0 ? "..." : "Not found"
+          }]);
           setMessages((m) => {
             const updated = [...m];
             updated[updated.length - 1] = {

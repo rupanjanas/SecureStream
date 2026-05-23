@@ -15,3 +15,4 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list[str]      # chunk previews used to answer
     org_id: str
+    chat_history: list[dict]      = []

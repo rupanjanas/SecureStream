@@ -20,6 +20,7 @@ _QUEUE_REGISTRY: Dict[str, asyncio.Queue] = {}
 class RetrievalState(TypedDict):
     question:         str
     org_id:           str
+    chat_history:     List[Dict[str, str]]
     doc_name:         Optional[str]
     queue_id:         str              # ← string key, not the Queue itself
     strategy:         Dict[str, Any]
@@ -37,13 +38,47 @@ def _get_queue(queue_id: str) -> asyncio.Queue:
     return _QUEUE_REGISTRY[queue_id]
 
 
-async def analyze_and_embed_node(state: RetrievalState) -> Dict[str, Any]:
-    q = state["question"]
-    q_lower = q.lower()
+async def _reformulate_question(question: str, history: str) -> str:
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "max_tokens": 60,
+                "temperature": 0,
+                "messages": [{
+                    "role": "user",
+                    "content": f"Rewrite the follow-up question as a standalone question.\n\nHistory:\n{history}\n\nFollow-up: {question}\n\nStandalone question:"
+                }]
+            }
+        )
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+    return question
 
-    print(f"\n{'='*60}")
-    print(f"[RETRIEVAL] Question: {q!r}")
-    print(f"[RETRIEVAL] org_id={state['org_id']} doc_name={state.get('doc_name')!r}")
+
+async def analyze_and_embed_node(state: RetrievalState) -> Dict[str, Any]:
+    question = state["question"]
+    history  = state.get("chat_history", [])
+
+    # If follow-up question, rewrite it with context
+    if history and any(
+        w in question.lower()
+        for w in ["it", "this", "that", "they", "he", "she", "there", "those"]
+    ):
+        # Reformulate using last 2 turns
+        recent   = history[-4:]   # last 2 Q/A pairs
+        context  = "\n".join(f"{m['role']}: {m['content']}" for m in recent)
+        question = await _reformulate_question(question, context)
+        print(f"[ANALYZE]   Reformulated: {question!r}")
+
+    # normalize question text for downstream use
+    q = question
+    q_lower = q.lower()
 
     if any(w in q_lower for w in ["compare", "difference", "versus", "vs"]):
         strategy = {"top_k": settings.top_k_comparison, "use_keyword": True,  "intent": "comparison"}
@@ -252,29 +287,30 @@ async def generate_stream_node(state: RetrievalState) -> Dict[str, Any]:
 
 async def grounding_check_node(state: RetrievalState) -> Dict[str, Any]:
     gen_text = state["generation"]
+    context  = state["context"]
 
-    if gen_text == "No relevant documents found.":
-        print(f"[GROUNDING] Skipped")
+    if not gen_text or gen_text == "No relevant documents found.":
+        _QUEUE_REGISTRY.pop(state["queue_id"], None)
         return {"grounded": True}
 
+    # Quick lexical check first — fast path
     gen_words     = set(re.findall(r'\b[a-zA-Z]{4,}\b', gen_text.lower()))
-    context_words = set(re.findall(r'\b[a-zA-Z]{4,}\b', state["context"].lower()))
-    skip          = {"found", "uploaded", "document", "context", "question", "assistant"}
-    target_words  = gen_words - skip
-    overlap       = target_words & context_words
-    is_grounded   = bool(overlap) or not target_words
+    context_words = set(re.findall(r'\b[a-zA-Z]{4,}\b', context.lower()))
+    noise         = {"found", "uploaded", "document", "context", "answer", "question"}
+    signal_words  = gen_words - noise
 
-    print(f"[GROUNDING] grounded={is_grounded} overlap_sample={list(overlap)[:5]}")
-    print(f"{'='*60}\n")
+    overlap_ratio = len(signal_words & context_words) / max(len(signal_words), 1)
+    is_grounded   = overlap_ratio >= 0.25   # at least 25% of answer words appear in context
 
-    # Cleanup queue from registry
+    print(f"[GROUNDING] overlap_ratio={overlap_ratio:.2f} grounded={is_grounded}")
+
     _QUEUE_REGISTRY.pop(state["queue_id"], None)
 
-    final_output = gen_text if is_grounded else "Not found in the uploaded document."
     asyncio.create_task(db_insert("query_logs", [{
-        "org_id":   state["org_id"],
-        "question": state["question"],
-        "answer":   final_output,
+        "org_id":    state["org_id"],
+        "question":  state["question"],
+        "answer":    gen_text,
+        "grounded":  is_grounded,
     }]))
 
     return {"grounded": is_grounded}

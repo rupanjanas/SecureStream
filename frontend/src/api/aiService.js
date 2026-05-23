@@ -44,7 +44,7 @@ if (!token) {
 }
 
 // Streaming version — calls onToken for each word, onDone when finished
-export async function askQuestionStream(question, onToken, onDone, topK = 3, currentDocName) {
+export async function askQuestionStream(question,docName,chatHistory = [],onToken,onDone,topK = 5) {
   const session = await getSession();
   console.log("SESSION:", session);
 if (!session || !session.access_token) {
@@ -67,7 +67,7 @@ const token = session.access_token;
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,   // ✅ FIXED
     },
-    body: JSON.stringify({ question,doc_name: currentDocName, top_k: topK })
+    body: JSON.stringify({ question,doc_name: docName, top_k: topK,chat_history: chatHistory.slice(-6) })
   });
 
   if (!res.ok) throw new Error(await res.text());

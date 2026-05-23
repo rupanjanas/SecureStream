@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback} from "react";
+import { useEffect, useState} from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { getHealth, listDocuments, getSession } from "../api/aiService";
@@ -13,23 +13,23 @@ export default function Dashboard({ user, orgId, orgName, mode }) {
     getHealth().then(setHealth).catch(() => setHealth({ status: "error" }));
   }, []);
 
-  const loadDocs = useCallback(async () => {
-    setDocsLoading(true);
-    setDocs([]); // ← Clear immediately so stale workspace docs don't flash
-    try {
-      const session = await getSession();
-      if (!session?.access_token) return;
-      const data = await listDocuments(session.access_token, orgId); // ← Pass orgId
-      setDocs(data.documents || []);
-    } catch {
-      setDocs([]);
-    } finally {
-      setDocsLoading(false);
-    }
-  }, [orgId]); // ← Reacts to orgId changes
   useEffect(() => {
+    const loadDocs = async () => {
+      setDocsLoading(true);
+      setDocs([]); // ← Clear immediately so stale workspace docs don't flash
+      try {
+        const session = await getSession();
+        if (!session?.access_token) return;
+        const data = await listDocuments(session.access_token, orgId); // ← Pass orgId
+        setDocs(data.documents || []);
+      } catch {
+        setDocs([]);
+      } finally {
+        setDocsLoading(false);
+      }
+    };
     loadDocs();
-  }, [loadDocs]);
+  }, [orgId]);
 
   const aiOnline = health?.status === "ok";
   const dbOnline = health?.db === "connected";
