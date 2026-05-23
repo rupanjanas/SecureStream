@@ -302,7 +302,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
     try {
       await askQuestionStream(
-        question,tokenRef.current || "dev-token",
+        question,
         docName,
         newHistory,
         (token) => {
