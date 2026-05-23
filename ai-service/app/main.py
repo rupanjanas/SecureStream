@@ -260,6 +260,11 @@ async def query_stream(
     # ── Run graph in background, catch startup import/init errors immediately ──
     try:
         graph_task = asyncio.create_task(retrieval_graph.ainvoke(initial_state))
+        # temporary — remove after confirming
+        await asyncio.sleep(2)
+        print(f"[SSE] graph_task state: done={graph_task.done()} cancelled={graph_task.cancelled()}")
+        if graph_task.done():
+            print(f"[SSE] graph_task exception: {graph_task.exception()}")
     except Exception as e:
         import traceback
         print(f"[SSE] Failed to create graph task:\n{traceback.format_exc()}")
