@@ -643,7 +643,19 @@ async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
             "match_count":     20,
             "filter_org_id":   org_id,
         })
- 
+    async def vs():
+        result = await db_rpc("match_documents", {
+        "query_embedding": query_vector,
+        "match_count":     20,
+        "filter_org_id":   org_id,
+        "filter_doc_name": body.doc_name or ""
+        })
+        print(f"[RPC] org_id={org_id} doc_name={body.doc_name} returned={len(result)} chunks")
+        if result:
+            print(f"[RPC] first chunk: {result[0].get('chunk_text','')[:80]}")
+        else:
+            print(f"[RPC] RAW RESPONSE: {result}")
+    return result
     async def keyword_search():
         from app.db import db_keyword_search
         results = []
