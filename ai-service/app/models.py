@@ -10,6 +10,7 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int =5          # how many chunks to retrieve
     doc_name: Optional[str] = None
+    chat_history: list[dict]      = []
     
 class QueryResponse(BaseModel):
     answer: str
