@@ -233,102 +233,128 @@ async def query_stream(
     body: QueryRequest,
     claims: dict = Depends(verify_token),
 ):
-    """
-    Streams LLM factual synthesis responses via a concurrent Queue 
-    while preserving Server-Sent Events formatting guidelines.
-    """
     org_id = claims.get("custom:org_id") or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="Missing valid organization context parameters.")
 
-    # Instantiate asynchronous pipeline communication primitive
-    token_communication_queue = asyncio.Queue()
+    print(f"\n[SSE] /query/stream called — question={body.question!r} org_id={org_id} doc_name={body.doc_name!r}")
+
+    token_queue = asyncio.Queue()
 
     initial_state = {
-        "question": body.question,
-        "org_id": org_id,
-        "doc_name": body.doc_name,
-        "token_queue": token_communication_queue,
-        "strategy": {}, 
-        "query_vector": [], 
-        "keywords": [],
-        "vector_results": [], 
-        "keyword_results": [], 
+        "question":         body.question,
+        "org_id":           org_id,
+        "doc_name":         body.doc_name,
+        "token_queue":      token_queue,
+        "strategy":         {},
+        "query_vector":     [],
+        "keywords":         [],
+        "vector_results":   [],
+        "keyword_results":  [],
         "combined_results": [],
-        "context": "", 
-        "generation": "", 
-        "grounded": False
+        "context":          "",
+        "generation":       "",
+        "grounded":         False,
     }
 
-    # Execute Graph computation engine concurrently inside an isolated background execution thread task
-    graph_task = asyncio.create_task(retrieval_graph.ainvoke(initial_state))
+    # ── Run graph in background, catch startup import/init errors immediately ──
+    try:
+        graph_task = asyncio.create_task(retrieval_graph.ainvoke(initial_state))
+    except Exception as e:
+        import traceback
+        print(f"[SSE] Failed to create graph task:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Graph init failed: {e}")
 
-    async def sse_stream_adapter_generator():
+    async def sse_generator():
         try:
             while True:
-                token = await token_communication_queue.get()
-                if token is None:  # Graph node signaling processing completion complete
-                    token_communication_queue.task_done()
+                try:
+                    token = await asyncio.wait_for(token_queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    if graph_task.done():
+                        try:
+                            exc = graph_task.exception()
+                            err_msg = f"Graph failed: {type(exc).__name__}: {exc}" if exc else "Graph done but no output"
+                        except Exception as meta_e:
+                            err_msg = f"Graph state unknown: {meta_e}"
+                    else:
+                        graph_task.cancel()
+                        err_msg = "Graph timed out after 30s — check Render logs for last [RETRIEVAL] line"
+                    print(f"[SSE] TIMEOUT — {err_msg}")
+                    yield "data: " + json.dumps({"token": f"\n[Error: {err_msg}]", "done": True}) + "\n\n"
+                    return
+
+                if token is None:
+                    token_queue.task_done()
                     break
-                
-                # Handled via explicit string concatenation to comply with pre-3.12 f-string backslash limits
-                yield "data: " + json.dumps({'token': token, 'done': False}) + "\n\n"
-                token_communication_queue.task_done()
-            
-            # Gather compiled evaluation context properties
-            final_graph_context = await graph_task
-            combined_chunks = final_graph_context.get("combined_results", [])
-            
-            if not combined_chunks:
-                yield "data: " + json.dumps({'token': 'No relevant content found.', 'done': False}) + "\n\n"
-                yield "data: " + json.dumps({'done': True, 'sources': [], 'source_passages': []}) + "\n\n"
+
+                yield "data: " + json.dumps({"token": token, "done": False}) + "\n\n"
+                token_queue.task_done()
+
+            # ── Collect final state ──
+            try:
+                final_state = await graph_task
+                print(f"[SSE] Graph completed — grounded={final_state.get('grounded')} "
+                      f"chunks={len(final_state.get('combined_results', []))}")
+            except Exception as e:
+                import traceback
+                print(f"[SSE] Graph task exception:\n{traceback.format_exc()}")
+                yield "data: " + json.dumps({
+                    "token": f"\n[Pipeline error: {type(e).__name__}: {e}]",
+                    "done": True
+                }) + "\n\n"
                 return
 
-            # Append notice payloads safely if generation falls out of reference contexts
-            if not final_graph_context.get("grounded", True):
-                warning_payload = {
-                    'token': '\n[Validation Warning: Generation detached from reference context]', 
-                    'done': False
-                }
-                yield "data: " + json.dumps(warning_payload) + "\n\n"
+            combined_chunks = final_state.get("combined_results", [])
 
-            # Parse structural payload response entries
+            if not combined_chunks:
+                print(f"[SSE] No combined_results in final state")
+                yield "data: " + json.dumps({"token": "No relevant content found.", "done": False}) + "\n\n"
+                yield "data: " + json.dumps({"done": True, "sources": [], "source_passages": []}) + "\n\n"
+                return
+
+            if not final_state.get("grounded", True):
+                yield "data: " + json.dumps({
+                    "token": "\n[Warning: answer may not be grounded in the document]",
+                    "done": False,
+                }) + "\n\n"
+
             source_passages = [
                 {
-                    "doc_name": c.get("doc_name"),
-                    "passage": c.get("chunk_text"),
-                    "similarity": round(c.get("similarity", 0), 3),
-                    "section": (c.get("metadata") or {}).get("section", ""),
+                    "doc_name":    c.get("doc_name"),
+                    "passage":     c.get("chunk_text"),
+                    "similarity":  round(c.get("similarity", 0), 3),
+                    "section":     (c.get("metadata") or {}).get("section", ""),
                     "page_number": (c.get("metadata") or {}).get("page_number", 1),
                 }
                 for c in combined_chunks
             ]
-            sources_summary = [c.get("chunk_text", "")[:200] + "..." for c in combined_chunks]
 
-            # Dispatch final tracking structural meta packet data closure envelope 
-            final_payload = {
-                'done': True, 
-                'sources': sources_summary, 
-                'source_passages': source_passages
-            }
-            yield "data: " + json.dumps(final_payload) + "\n\n"
-            
+            yield "data: " + json.dumps({
+                "done":            True,
+                "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined_chunks],
+                "source_passages": source_passages,
+            }) + "\n\n"
+
         except Exception as e:
-            error_payload = {'token': f'\nStream execution fault: {str(e)}', 'done': True}
-            yield "data: " + json.dumps(error_payload) + "\n\n"
+            import traceback
+            print(f"[SSE] Outer generator exception:\n{traceback.format_exc()}")
+            yield "data: " + json.dumps({
+                "token": f"\n[Stream error: {type(e).__name__}: {e}]",
+                "done": True
+            }) + "\n\n"
             if not graph_task.done():
                 graph_task.cancel()
 
     return StreamingResponse(
-        sse_stream_adapter_generator(),
+        sse_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache", 
+            "Cache-Control":     "no-cache",
             "X-Accel-Buffering": "no",
-            "Connection": "keep-alive"
+            "Connection":        "keep-alive",
         },
     )
-
 # ──────────────────────────────────────────────────────────────────────────────
 # METRIC LOGGER HISTORY ENDPOINTS (RESTORED)
 # ──────────────────────────────────────────────────────────────────────────────
