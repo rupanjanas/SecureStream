@@ -14,11 +14,26 @@ from app.db import db_rpc, db_select_or_rpc
 from app.ingestion_graph import ingestion_graph
 from app.retrieval_graph import retrieval_graph
 
+from pydantic import BaseModel
+from typing import Optional
+import httpx
+from app.db import db_insert, HEADERS, BASE
+
 app = FastAPI(
     title="SecureStream AI Core Service", 
     version="3.0.0",
     description="Production-grade secure RAG engine powered by LangGraph, FastAPI, and Groq."
 )
+
+class AnnotationCreate(BaseModel):
+    doc_name:      str
+    selected_text: str
+    note:          str
+    color:         Optional[str]  = "#FCD34D"
+    is_shared:     Optional[bool] = False
+ 
+class AnnotationUpdate(BaseModel):
+    is_shared: bool
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CORS MIDDLEWARE SETUP
@@ -60,6 +75,87 @@ async def health_check():
 # ──────────────────────────────────────────────────────────────────────────────
 # DOCUMENT MANAGEMENT ENDPOINTS (RESTORED)
 # ──────────────────────────────────────────────────────────────────────────────
+@app.post("/annotations", tags=["Annotations"])
+async def create_annotation(
+    body:   AnnotationCreate,
+    claims: dict = Depends(verify_token),
+):
+    org_id     = claims.get("sub")
+    user_email = claims.get("email", "unknown")
+    rows = await db_insert("annotations", [{
+        "org_id":        org_id,
+        "doc_name":      body.doc_name,
+        "user_email":    user_email,
+        "selected_text": body.selected_text,
+        "note":          body.note,
+        "color":         body.color,
+        "is_shared":     body.is_shared,
+    }])
+    return rows[0] if rows else {}
+ 
+ 
+@app.get("/annotations/{doc_name}", tags=["Annotations"])
+async def get_annotations(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+):
+    org_id     = claims.get("sub")
+    user_email = claims.get("email", "unknown")
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/annotations",
+            headers=HEADERS,
+            params={
+                "doc_name": f"eq.{doc_name}",
+                "or":       f"(user_email.eq.{user_email},is_shared.eq.true)",
+                "org_id":   f"eq.{org_id}",
+                "order":    "created_at.asc",
+            },
+        )
+        return r.json()
+ 
+ 
+@app.patch("/annotations/{annotation_id}", tags=["Annotations"])
+async def update_annotation(
+    annotation_id: str,
+    body:          AnnotationUpdate,
+    claims:        dict = Depends(verify_token),
+):
+    async with httpx.AsyncClient() as client:
+        r = await client.patch(
+            f"{BASE}/rest/v1/annotations",
+            headers={**HEADERS, "Prefer": "return=representation"},
+            params={"id": f"eq.{annotation_id}"},
+            json={"is_shared": body.is_shared},
+        )
+        data = r.json()
+        return data[0] if data else {}
+ 
+ 
+@app.get("/documents/{doc_name}/text", tags=["Documents"])
+async def get_document_text(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+):
+    org_id = claims.get("custom:org_id") or claims.get("sub")
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id":   f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "select":   "chunk_text,metadata",
+            },
+        )
+        chunks = r.json()
+ 
+    chunks_sorted = sorted(
+        chunks,
+        key=lambda x: (x.get("metadata") or {}).get("chunk_index", 0),
+    )
+    full_text = " ".join(c.get("chunk_text", "") for c in chunks_sorted)
+    return {"doc_name": doc_name, "text": full_text, "chunk_count": len(chunks_sorted)}
 
 @app.get("/documents", tags=["Documents"])
 async def list_documents(
