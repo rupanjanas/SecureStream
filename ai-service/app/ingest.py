@@ -278,7 +278,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             json={
                 "input": texts,
                 "model": "jina-embeddings-v3",
-                "task":  "retrieval.passage",
+                "task":  "text-matching",  # ← symmetric task, works for both
             },
         )
         r.raise_for_status()

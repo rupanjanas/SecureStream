@@ -481,7 +481,7 @@ async def embed_query(question: str) -> list[float]:
             json={
                 "input": [question],
                 "model": "jina-embeddings-v3",
-                "task":  "retrieval.query",
+                "task":  "text-matching",  # ← same as ingest
             },
         )
         r.raise_for_status()
