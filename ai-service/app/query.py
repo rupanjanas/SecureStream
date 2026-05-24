@@ -604,13 +604,28 @@ async def retrieve(
     doc_name:   str  = "",
     top_k:      int  = 5,
 ) -> list[dict]:
-    """
-    Single retrieval function used everywhere.
-    Runs vector search + keyword search in parallel,
-    merges, deduplicates, filters junk, reranks.
-    """
-    query_vector = await embed_query(question)
-    keywords     = extract_keywords(question)
+
+    # ── Expand short/vague queries before embedding ──
+    # Single words like "Abstract" perform poorly as query vectors.
+    # Expanding them dramatically improves retrieval.
+    expanded = question
+    expansions = {
+        "abstract":      "abstract summary overview of the project",
+        "introduction":  "introduction background motivation of the project",
+        "conclusion":    "conclusion findings summary results of the project",
+        "methodology":   "methodology approach methods system design",
+        "results":       "results findings evaluation performance metrics",
+        "references":    "references bibliography citations",
+        "acknowledgement": "acknowledgement gratitude thanks",
+        "keywords":      "keywords key terms",
+    }
+    q_lower = question.lower().strip()
+    if q_lower in expansions:
+        expanded = expansions[q_lower]
+        print(f"[RETRIEVE] Expanded {question!r} → {expanded!r}")
+
+    query_vector = await embed_query(expanded)
+    keywords     = extract_keywords(question)  # still use original for keyword search
 
     async def vector_search():
         try:
@@ -622,7 +637,7 @@ async def retrieve(
             })
             print(f"[VECTOR] org={org_id} doc={doc_name!r} → {len(result)} chunks")
             if result:
-                print(f"[VECTOR] top chunk sim={result[0].get('similarity',0):.3f} text={result[0].get('chunk_text','')[:60]!r}")
+                print(f"[VECTOR] top sim={result[0].get('similarity',0):.3f} text={result[0].get('chunk_text','')[:60]!r}")
             return result
         except Exception as e:
             print(f"[VECTOR ERROR] {e}")
@@ -630,19 +645,29 @@ async def retrieve(
 
     async def keyword_search():
         results = []
+        # Also search for the original question as a keyword
+        search_terms = list(dict.fromkeys([question.lower()] + keywords))[:5]
         batches = await asyncio.gather(
             *[db_keyword_search(org_id, kw, doc_name=doc_name or None)
-              for kw in keywords[:4]],
+              for kw in search_terms],
             return_exceptions=True,
         )
         for b in batches:
             if isinstance(b, list):
                 results.extend(b)
-        print(f"[KEYWORD] {len(keywords)} keywords → {len(results)} chunks")
+        print(f"[KEYWORD] {len(search_terms)} terms → {len(results)} chunks")
         return results
 
     vec_chunks, kw_chunks = await asyncio.gather(vector_search(), keyword_search())
-    combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+
+    # If vector results are poor, boost keyword results
+    best_sim = max((c.get("similarity", 0) for c in vec_chunks), default=0)
+    if best_sim < 0.35:
+        print(f"[RETRIEVE] Low sim={best_sim:.3f} — boosting keyword results")
+        combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+    else:
+        combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+
     combined = rerank(question, combined)
     combined = combined[:top_k]
 
