@@ -95,10 +95,10 @@ async def db_test() -> bool:
 
 async def db_keyword_search(org_id: str, keyword: str, doc_name: str = None) -> list:
     params = {
-        "org_id":  f"eq.{org_id}",
+        "org_id":     f"eq.{org_id}",
         "chunk_text": f"ilike.%{keyword}%",
-        "select":  "id,doc_name,chunk_text,metadata,file_url",
-        "limit":   "5",
+        "select":     "id,doc_name,chunk_text,metadata",
+        "limit":      "5",
     }
     if doc_name:
         params["doc_name"] = f"eq.{doc_name}"
@@ -109,8 +109,14 @@ async def db_keyword_search(org_id: str, keyword: str, doc_name: str = None) -> 
             headers=HEADERS,
             params=params,
         )
-        print(f"KEYWORD SEARCH '{keyword}' found: {len(r.json())} chunks")
-        return r.json()
+        print(f"[KW] '{keyword}' status={r.status_code} len={len(r.text)} response={r.text[:200]}")
+        if not r.text.strip():
+            return []
+        try:
+            return r.json()
+        except Exception as e:
+            print(f"[KW ERROR] {e}")
+            return []
 
 async def db_patch(table: str, filters: dict, data: dict) -> list:
     params = {k: f"eq.{v}" for k, v in filters.items()}

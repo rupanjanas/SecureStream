@@ -443,7 +443,6 @@ STOP_WORDS = {
     "who", "which", "can", "will", "there", "any", "all", "tell", "me",
     "show", "give", "find", "list", "please", "could", "would", "should",
     "its", "it", "be", "been", "being", "get", "got", "just", "also",
-    "section", "page", "document", "text", "content",
 }
 
 # ── RAG prompt ────────────────────────────────────────────────────────────────
