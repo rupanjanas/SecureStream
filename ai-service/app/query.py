@@ -559,7 +559,7 @@ def deduplicate(chunks: list[dict]) -> list[dict]:
 
 # ── Reranker ──────────────────────────────────────────────────────────────────
 
-def rerank(question: str, chunks: list[dict]) -> list[dict]:
+def rerank(question: str, chunks: list[dict], keyword_ids: set = None) -> list[dict]:
     q_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
 
     def score(chunk: dict) -> float:
@@ -567,6 +567,12 @@ def rerank(question: str, chunks: list[dict]) -> list[dict]:
         c_words    = set(re.findall(r'\b[a-zA-Z]{3,}\b', text))
         overlap    = len(q_words & c_words) / max(len(q_words), 1)
         similarity = chunk.get("similarity", 0.0)
+
+        # Keyword-matched chunks get a strong baseline boost
+        # since ilike match means the exact term is present
+        if similarity == 0.0 and overlap > 0:
+            similarity = 0.5   # baseline for keyword hits
+
         return 0.8 * similarity + 0.2 * overlap
 
     return sorted(chunks, key=score, reverse=True)
@@ -661,11 +667,11 @@ async def retrieve(
 
     # If vector results are poor, boost keyword results
     best_sim = max((c.get("similarity", 0) for c in vec_chunks), default=0)
-    if best_sim < 0.35:
-        print(f"[RETRIEVE] Low sim={best_sim:.3f} — boosting keyword results")
+    if best_sim < 0.40:
+        print(f"[RETRIEVE] Low sim={best_sim:.3f} — keyword results prioritized")
         combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
     else:
-        combined = filter_junk(deduplicate(kw_chunks + vec_chunks))
+        combined = filter_junk(deduplicate(vec_chunks + kw_chunks))
 
     combined = rerank(question, combined)
     combined = combined[:top_k]
