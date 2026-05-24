@@ -94,23 +94,23 @@ async def db_test() -> bool:
         return r.status_code == 200
 
 async def db_keyword_search(org_id: str, keyword: str, doc_name: str = None) -> list:
-    params = {
-        "org_id":     f"eq.{org_id}",
-        "chunk_text": f"ilike.%{keyword}%",
-        "select":     "id,doc_name,chunk_text,metadata",
-        "limit":      "5",
-    }
+    # Build the URL manually to avoid % encoding issues
+    filters = (
+        f"org_id=eq.{org_id}"
+        f"&chunk_text=ilike.*{keyword}*"  # use * instead of % for PostgREST
+        f"&select=id,doc_name,chunk_text,metadata"
+        f"&limit=5"
+    )
     if doc_name:
-        params["doc_name"] = f"eq.{doc_name}"
+        filters += f"&doc_name=eq.{doc_name}"
 
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            f"{BASE}/rest/v1/documents",
+            f"{BASE}/rest/v1/documents?{filters}",
             headers=HEADERS,
-            params=params,
         )
-        print(f"[KW] '{keyword}' status={r.status_code} len={len(r.text)} response={r.text[:200]}")
-        if not r.text.strip():
+        print(f"[KW] '{keyword}' status={r.status_code} len={len(r.text)}")
+        if r.status_code != 200 or not r.text.strip():
             return []
         try:
             return r.json()
