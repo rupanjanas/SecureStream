@@ -670,7 +670,14 @@ async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
         }
         for c in combined
     ]
-
+    # In query.py — add this function
+async def save_query_log(org_id: str, question: str, answer: str, source_passages: list):
+    await db_insert("query_logs", [{
+        "org_id":          org_id,
+        "question":        question,
+        "answer":          answer,
+        "source_passages": json.dumps(source_passages),
+    }])
     result = {
         "answer":          answer,
         "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined],

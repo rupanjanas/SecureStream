@@ -1,9 +1,11 @@
+import asyncio
+
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
-
+from starlette.middleware.base import BaseHTTPMiddleware
 import json
 import httpx
 from app.auth import verify_token
@@ -12,6 +14,11 @@ from app.query import retrieve, build_context, RAG_PROMPT, ask_groq
 from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.db import db_insert, db_test, HEADERS, BASE
 from app.config import settings
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
+from app.ratelimit import check_rate_limit
+from fastapi import WebSocket, WebSocketDisconnect, Query as QQuery
+from app.ws import hub
 
 
 # ──────────────────────────────────────────────
@@ -28,7 +35,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"]    = "nosniff"
+        response.headers["X-Frame-Options"]           = "DENY"
+        response.headers["X-XSS-Protection"]          = "1; mode=block"
+        response.headers["Referrer-Policy"]            = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"]         = "camera=(), microphone=(), geolocation=()"
+        response.headers["Strict-Transport-Security"]  = "max-age=31536000; includeSubDomains"
+        return response
 
+app.add_middleware(SecurityHeadersMiddleware)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Only rate-limit AI endpoints
+    if not request.url.path.startswith("/query"):
+        return await call_next(request)
+
+    # Extract user identity from token (best effort)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        # Decode without verification just to get sub for rate limiting
+        try:
+            import base64, json as _json
+            payload_b64 = token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            payload     = _json.loads(base64.b64decode(payload_b64))
+            user_id     = payload.get("sub", "anonymous")
+            # Determine tier from token claims
+            tier        = payload.get("custom:tier", "free")
+        except Exception:
+            user_id = "anonymous"
+            tier    = "free"
+    else:
+        user_id = "anonymous"
+        tier    = "free"
+
+    endpoint = request.url.path
+    allowed, remaining, retry_after = await check_rate_limit(user_id, endpoint, tier)
+
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please slow down."},
+            headers={
+                "Retry-After":           str(retry_after),
+                "X-RateLimit-Limit":     str(100),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset":     str(int(time.time()) + retry_after),
+            }
+        )
+
+    response = await call_next(request)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
+
+@app.websocket("/ws/doc/{doc_name}")
+async def doc_websocket(
+    websocket: WebSocket,
+    doc_name:  str,
+    token:     str = QQuery(...),
+    org_id:    str = QQuery(...),
+    email:     str = QQuery("anonymous"),
+):
+    """
+    Real-time collaborative channel for a document.
+    Client sends JSON events:
+      { type: "cursor",     x, y, page }
+      { type: "annotation", action: "create"|"update"|"delete", data: {...} }
+      { type: "ping" }
+    """
+    await hub.connect(websocket, org_id, doc_name, email)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+
+            if msg.get("type") == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
+
+            # Attach sender identity and broadcast
+            msg["email"] = email
+            await hub.broadcast_event(websocket, msg)
+
+    except WebSocketDisconnect:
+        await hub.disconnect(websocket)
+    except Exception as e:
+        print(f"[WS] Error: {e}")
+        await hub.disconnect(websocket)
 # ──────────────────────────────────────────────
 # Models
 # ──────────────────────────────────────────────
@@ -64,8 +165,12 @@ async def create_annotation(
     body:   AnnotationCreate,
     claims: dict = Depends(verify_token),
 ):
-    org_id     = claims.get("sub")
-    user_email = claims.get("email", "unknown")
+    org_id     = claims.get("custom:org_id") or claims.get("sub")
+    user_email = claims.get("email", "dev@securestream.local")
+
+    if not org_id:
+        raise HTTPException(status_code=400, detail="No org_id in token")
+
     rows = await db_insert("annotations", [{
         "org_id":        org_id,
         "doc_name":      body.doc_name,
@@ -75,7 +180,11 @@ async def create_annotation(
         "color":         body.color,
         "is_shared":     body.is_shared,
     }])
-    return rows[0] if rows else {}
+
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to save annotation")
+
+    return rows[0]
 
 
 @app.get("/annotations/{doc_name}")
@@ -83,42 +192,83 @@ async def get_annotations(
     doc_name: str,
     claims:   dict = Depends(verify_token),
 ):
-    org_id     = claims.get("sub")
-    user_email = claims.get("email", "unknown")
+    org_id     = claims.get("custom:org_id") or claims.get("sub")
+    user_email = claims.get("email", "dev@securestream.local")
+
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/annotations",
             headers=HEADERS,
             params={
+                "org_id":   f"eq.{org_id}",
                 "doc_name": f"eq.{doc_name}",
                 "or":       f"(user_email.eq.{user_email},is_shared.eq.true)",
-                "org_id":   f"eq.{org_id}",
                 "order":    "created_at.asc",
+                "select":   "*",
             },
         )
-        return r.json()
+        if r.status_code != 200:
+            print(f"[ANNOTATIONS] Supabase error: {r.status_code} {r.text}")
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
 
 
-@app.patch("/annotations/{annotation_id}")
-async def update_annotation(
+@app.put("/annotations/{annotation_id}")
+async def update_annotation_note(
     annotation_id: str,
-    body:          AnnotationUpdate,
+    body:          AnnotationCreate,
     claims:        dict = Depends(verify_token),
 ):
+    """Update text content of an annotation — only owner can edit"""
+    user_email = claims.get("email", "dev@securestream.local")
+
     async with httpx.AsyncClient() as client:
         r = await client.patch(
             f"{BASE}/rest/v1/annotations",
             headers={**HEADERS, "Prefer": "return=representation"},
-            params={"id": f"eq.{annotation_id}"},
-            json={"is_shared": body.is_shared},
+            params={
+                "id":         f"eq.{annotation_id}",
+                "user_email": f"eq.{user_email}",   # owner-only guard
+            },
+            json={
+                "note":          body.note,
+                "color":         body.color,
+                "selected_text": body.selected_text,
+            },
         )
         data = r.json()
-        return data[0] if data else {}
+        if not data:
+            raise HTTPException(status_code=403, detail="Not authorized or annotation not found")
+        return data[0]
+
+
+@app.delete("/annotations/{annotation_id}")
+async def delete_annotation(
+    annotation_id: str,
+    claims:        dict = Depends(verify_token),
+):
+    """Delete annotation — only owner can delete"""
+    user_email = claims.get("email", "dev@securestream.local")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(
+            f"{BASE}/rest/v1/annotations",
+            headers=HEADERS,
+            params={
+                "id":         f"eq.{annotation_id}",
+                "user_email": f"eq.{user_email}",
+            },
+        )
+        return {"deleted": r.status_code == 204}
 
 
 # ──────────────────────────────────────────────
 # Ingest
 # ──────────────────────────────────────────────
+
+ALLOWED_MIME = {"application/pdf", "text/plain"}
+MAX_FILE_MB  = 10
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
@@ -129,8 +279,22 @@ async def ingest(
     org_id = claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
+
+    # Validate MIME type
+    if file.content_type not in ALLOWED_MIME:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
+
     file_bytes = await file.read()
-    return await ingest_document(file_bytes, file.filename, org_id, domain=x_domain)
+
+    # Validate file size
+    if len(file_bytes) > MAX_FILE_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB}MB limit")
+
+    # Sanitize filename — strip path traversal
+    import os
+    safe_filename = os.path.basename(file.filename or "upload").replace("..", "")
+
+    return await ingest_document(file_bytes, safe_filename, org_id, domain=x_domain)
 
 
 # ──────────────────────────────────────────────
@@ -176,35 +340,25 @@ async def query_stream(
         for c in combined
     ]
 
-    async def stream_groq():
-        async with httpx.AsyncClient(timeout=30) as client:
-            async with client.stream(
-                "POST",
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.groq_api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json={
-                    "model":       "llama-3.1-8b-instant",
-                    "temperature": 0.1,
-                    "max_tokens":  600,
-                    "stream":      True,
-                    "messages":    [{"role": "user", "content": prompt}],
-                },
-            ) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: ") or line == "data: [DONE]":
-                        continue
-                    try:
-                        chunk = json.loads(line[6:])
-                        token = chunk["choices"][0]["delta"].get("content", "")
-                        if token:
-                            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                    except Exception:
-                        continue
+async def stream_groq():
+    full_answer = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        async with client.stream("POST", ...) as resp:
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                try:
+                    chunk = json.loads(line[6:])
+                    token = chunk["choices"][0]["delta"].get("content", "")
+                    if token:
+                        full_answer.append(token)
+                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                except Exception:
+                    continue
 
-                yield f"data: {json.dumps({'done': True, 'sources': [c['chunk_text'][:200] + '...' for c in combined], 'source_passages': source_passages})}\n\n"
+                answer_text = "".join(full_answer)
+                asyncio.create_task(save_query_log(org_id, body.question, answer_text, source_passages))
+                yield f"data: {json.dumps({'done': True, 'sources': [...], 'source_passages': source_passages})}\n\n"
 
     return StreamingResponse(
         stream_groq(),

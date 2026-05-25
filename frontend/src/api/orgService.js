@@ -23,6 +23,28 @@ export async function getMyOrg() {
   return res.json();
 }
 
+export async function updateAnnotation(id, data, token) {
+  const res = await fetch(`${AI_URL}/annotations/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteAnnotation(id, token) {
+  const res = await fetch(`${AI_URL}/annotations/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function getOrgMembers() {
   const res = await fetch(`${AUTH_URL}/org/members`, {
     credentials: "include"

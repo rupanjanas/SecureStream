@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
@@ -6,6 +6,8 @@ import { retrieveFile } from "../utils/filestore";
 import {
   getAnnotations,
   createAnnotation,
+  updateAnnotation,
+  deleteAnnotation,
   toggleShareAnnotation,
   getOrgMembers,
   getOnlineMembers,
@@ -15,7 +17,7 @@ import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { askQuestionStream, getDocumentText } from "../api/aiService";
-
+import { useDocCollaboration } from "../hooks/useDocCollaboration";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
@@ -100,12 +102,39 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const isOrg     = mode === "org";
   const isPDF     = docName.toLowerCase().endsWith(".pdf");
 
+  // ── State ──
+  const [editingId, setEditingId]         = useState(null);
+  const [editNote, setEditNote]           = useState("");
+  const [deletingId, setDeletingId]       = useState(null);
+  const [remoteCursors, setRemoteCursors] = useState({});
+  const [onlineEmails, setOnlineEmails]   = useState([]);
+  const [chatHistory, setChatHistory]     = useState([]);
+  const [numPages, setNumPages]           = useState(null);
+  const [fetchedText, setFetchedText]     = useState("");
+  const [input, setInput]                 = useState("");
+  const [loading, setLoading]             = useState(false);
+  const [highlights, setHighlights]       = useState([]);
+  const [highlightedPages, setHighlightedPages] = useState({});
+  const [sourcePassages, setSourcePassages]     = useState([]);
+  const [annotations, setAnnotations]           = useState([]);
+  const [activeAnnotation, setActiveAnnotation] = useState(null);
+  const [newNote, setNewNote]                   = useState("");
+  const [selectedText, setSelectedText]         = useState("");
+  const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
+  const [showNotePanel, setShowNotePanel]       = useState(false);
+  const [savingNote, setSavingNote]             = useState(false);
+  const [sharingId, setSharingId]               = useState(null);
+  const [members, setMembers]                   = useState([]);
+  const [onlineSet, setOnlineSet]               = useState(new Set());
+
   // ── Refs ──
   const pageRefs  = useRef({});
   const pdfUrlRef = useRef(null);
   const bottomRef = useRef(null);
   const tokenRef  = useRef(null);
-  const [chatHistory, setChatHistory] = useState([]);
+
+  const userEmail = user?.email || "dev@securestream.local";
+
   // ── PDF blob URL — created once ──
   const pdfFile = useMemo(() => {
     if (!isPDF) return null;
@@ -141,12 +170,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   });
 
-  // Clear stuck streaming messages on mount
+  // ── Clear stuck streaming messages on mount ──
   useEffect(() => {
     setMessages((m) => m.filter((msg) => !msg.streaming && msg.content));
   }, []);
 
-  // Persist settled messages
+  // ── Persist settled messages ──
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
     if (settled.length === 0) return;
@@ -154,27 +183,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
       localStorage.setItem(CHAT_KEY, JSON.stringify(settled));
     } catch { /* storage full */ }
   }, [messages, CHAT_KEY]);
-
-  // ── State ──
-  const [numPages, setNumPages]                 = useState(null);
-  const [fetchedText, setFetchedText]           = useState("");
-  const [input, setInput]                       = useState("");
-  const [loading, setLoading]                   = useState(false);
-  const [highlights, setHighlights]             = useState([]);
-  const [highlightedPages, setHighlightedPages] = useState({});
-  const [sourcePassages, setSourcePassages]     = useState([]);
-  const [annotations, setAnnotations]           = useState([]);
-  const [activeAnnotation, setActiveAnnotation] = useState(null);
-  const [newNote, setNewNote]                   = useState("");
-  const [selectedText, setSelectedText]         = useState("");
-  const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
-  const [showNotePanel, setShowNotePanel]       = useState(false);
-  const [savingNote, setSavingNote]             = useState(false);
-  const [sharingId, setSharingId]               = useState(null);
-  const [members, setMembers]                   = useState([]);
-  const [onlineSet, setOnlineSet]               = useState(new Set());
-
-  const userEmail = user?.email || "dev@securestream.local";
 
   // ── Fetch token once ──
   useEffect(() => {
@@ -235,7 +243,44 @@ export default function DocViewerPage({ user, mode, orgName }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // ── Collaboration hook ──
+  const { sendCursor, sendAnnotationEvent } = useDocCollaboration({
+    docName,
+    orgId:   isOrg ? orgName : null,
+    email:   userEmail,
+    token:   tokenRef.current,
+    onCursor: (msg) => {
+      setRemoteCursors((prev) => ({
+        ...prev,
+        [msg.email]: { x: msg.x, y: msg.y, page: msg.page }
+      }));
+    },
+    onAnnotationEvent: (msg) => {
+      if (msg.action === "create") {
+        setAnnotations((a) => [...a, msg.data]);
+      } else if (msg.action === "update") {
+        setAnnotations((a) => a.map((ann) => ann.id === msg.data.id ? msg.data : ann));
+      } else if (msg.action === "delete") {
+        setAnnotations((a) => a.filter((ann) => ann.id !== msg.data.id));
+      }
+    },
+    onPresence: (msg) => {
+      if (msg.event === "joined") setOnlineEmails((e) => [...new Set([...e, msg.email])]);
+      if (msg.event === "left")   setOnlineEmails((e) => e.filter((x) => x !== msg.email));
+    },
+  });
+
   // ── Handlers ──
+  const handleMouseMove = useCallback((e) => {
+    if (!isOrg) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    sendCursor(
+      Math.round(e.clientX - rect.left),
+      Math.round(e.clientY - rect.top),
+      1
+    );
+  }, [isOrg, sendCursor]);
+
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
@@ -267,6 +312,38 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
+  const handleEditNote = async (ann) => {
+    if (!editNote.trim()) return;
+    try {
+      const updated = await updateAnnotation(ann.id, {
+        doc_name:      ann.doc_name,
+        selected_text: ann.selected_text,
+        note:          editNote.trim(),
+        color:         ann.color,
+      }, tokenRef.current || "dev-token");
+      setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, note: updated.note } : a));
+      if (activeAnnotation?.id === ann.id)
+        setActiveAnnotation((a) => ({ ...a, note: updated.note }));
+      setEditingId(null);
+      setEditNote("");
+    } catch (err) {
+      console.error("Edit error:", err);
+    }
+  };
+
+  const handleDeleteAnnotation = async (ann) => {
+    setDeletingId(ann.id);
+    try {
+      await deleteAnnotation(ann.id, tokenRef.current || "dev-token");
+      setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
+      if (activeAnnotation?.id === ann.id) setActiveAnnotation(null);
+    } catch (err) {
+      console.error("Delete error:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const handleToggleShare = async (ann) => {
     setSharingId(ann.id);
     try {
@@ -288,7 +365,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     if (!question || loading) return;
     const newHistory = [...chatHistory, { role: "user", content: question }];
     setChatHistory(newHistory);
-    // Add user message, clear any stuck streaming message, add fresh assistant placeholder
     setMessages((m) => [
       ...m.filter((msg) => !msg.streaming),
       { role: "user", content: question },
@@ -314,9 +390,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
           });
         },
         (sources, passages) => {
-          setChatHistory(h => [...h, {
-          role:    "assistant",
-          content: passages.length > 0 ? "..." : "Not found"
+          setChatHistory((h) => [...h, {
+            role:    "assistant",
+            content: passages.length > 0 ? "..." : "Not found"
           }]);
           setMessages((m) => {
             const updated = [...m];
@@ -373,6 +449,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
+  // ── Derived values ──
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
   const sharedAnnotations = safeAnnotations.filter((a) => a.is_shared && a.user_email !== userEmail);
@@ -397,8 +474,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
             isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center gap-3 min-w-0">
-              <button onClick={() => navigate("/dashboard")}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0">
+              <button
+                onClick={() => navigate("/dashboard")}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+              >
                 ← Dashboard
               </button>
               <span className="text-gray-200">|</span>
@@ -477,14 +556,18 @@ export default function DocViewerPage({ user, mode, orgName }) {
           {/* Document content */}
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
+            onMouseMove={handleMouseMove}
             className="flex-1 overflow-y-auto"
+            style={{ position: "relative" }}
           >
             {/* Active annotation */}
             {activeAnnotation && (
-              <div style={{ borderLeftColor: activeAnnotation.color }}
-                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3">
+              <div
+                style={{ borderLeftColor: activeAnnotation.color }}
+                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3"
+              >
                 <div className="flex items-start justify-between">
-                  <div>
+                  <div className="flex-1 min-w-0">
                     <p className="text-xs text-gray-400 mb-0.5">
                       {activeAnnotation.user_email === userEmail
                         ? "Your note"
@@ -494,15 +577,72 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       )}
                     </p>
                     <p className="text-xs text-gray-500 italic mb-1">
-                      "{activeAnnotation.selected_text.slice(0, 80)}
-                      {activeAnnotation.selected_text.length > 80 ? "..." : ""}"
+                      "{activeAnnotation.selected_text?.slice(0, 80)}
+                      {activeAnnotation.selected_text?.length > 80 ? "..." : ""}"
                     </p>
-                    <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
+
+                    {editingId === activeAnnotation.id ? (
+                      <div className="flex gap-2 mt-1">
+                        <input
+                          type="text"
+                          value={editNote}
+                          onChange={(e) => setEditNote(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && handleEditNote(activeAnnotation)}
+                          className="flex-1 border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-[#185FA5]"
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => handleEditNote(activeAnnotation)}
+                          className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => { setEditingId(null); setEditNote(""); }}
+                          className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
+                    )}
                   </div>
-                  <button onClick={() => setActiveAnnotation(null)}
-                    className="text-xs text-gray-400 hover:text-gray-600 ml-4 flex-shrink-0">✕</button>
+
+                  <div className="flex items-center gap-1 ml-3 flex-shrink-0">
+                    {/* Edit button — owner only */}
+                    {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
+                      <button
+                        onClick={() => {
+                          setEditingId(activeAnnotation.id);
+                          setEditNote(activeAnnotation.note);
+                        }}
+                        className="text-xs text-gray-400 hover:text-gray-600 px-1.5 py-1 rounded hover:bg-gray-100"
+                      >
+                        Edit
+                      </button>
+                    )}
+                    {/* Delete button — owner only */}
+                    {activeAnnotation.user_email === userEmail && (
+                      <button
+                        onClick={() => handleDeleteAnnotation(activeAnnotation)}
+                        disabled={deletingId === activeAnnotation.id}
+                        className="text-xs text-red-400 hover:text-red-600 px-1.5 py-1 rounded hover:bg-red-50"
+                      >
+                        {deletingId === activeAnnotation.id ? "..." : "Delete"}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setActiveAnnotation(null)}
+                      className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
-                {activeAnnotation.user_email === userEmail && (
+
+                {/* Share toggle — owner only */}
+                {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
                   <button
                     onClick={() => handleToggleShare(activeAnnotation)}
                     disabled={sharingId === activeAnnotation.id}
@@ -515,7 +655,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     {sharingId === activeAnnotation.id
                       ? "Updating..."
                       : activeAnnotation.is_shared
-                      ? "Shared with org · click to make private"
+                      ? "Shared · click to make private"
                       : "Private · click to share with org"}
                   </button>
                 )}
@@ -595,8 +735,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                             style={{ borderColor: ann.color }}
                             className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5"
                           >
-                            <span style={{ backgroundColor: ann.color }}
-                              className="w-2 h-2 rounded-full inline-block"/>
+                            <span
+                              style={{ backgroundColor: ann.color }}
+                              className="w-2 h-2 rounded-full inline-block"
+                            />
                             "{ann.selected_text.slice(0, 25)}..."
                             {ann.is_shared && <span className="text-blue-400 ml-1">shared</span>}
                           </button>
@@ -630,7 +772,29 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 )}
               </div>
             )}
+
+            {/* Remote cursors overlay */}
+            {Object.entries(remoteCursors).map(([email, pos]) => (
+              <div
+                key={email}
+                style={{
+                  position:      "absolute",
+                  left:          pos.x,
+                  top:           pos.y,
+                  pointerEvents: "none",
+                  zIndex:        50,
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16">
+                  <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5" />
+                </svg>
+                <span className="text-xs bg-[#185FA5] text-white px-1 rounded ml-1 whitespace-nowrap">
+                  {email.split("@")[0]}
+                </span>
+              </div>
+            ))}
           </div>
+          {/* END Document content */}
 
           {/* Note panel */}
           {showNotePanel && (
@@ -642,13 +806,19 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     "{selectedText.slice(0, 50)}{selectedText.length > 50 ? "..." : ""}"
                   </span>
                 </p>
-                <button onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
-                  className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                <button
+                  onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
+                  className="text-xs text-gray-400 hover:text-gray-600"
+                >
+                  Cancel
+                </button>
               </div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-xs text-gray-400">Color:</span>
                 {ANNOTATION_COLORS.map((c) => (
-                  <button key={c} onClick={() => setNoteColor(c)}
+                  <button
+                    key={c}
+                    onClick={() => setNoteColor(c)}
                     style={{ backgroundColor: c }}
                     className={`w-5 h-5 rounded-full border-2 transition-transform ${
                       noteColor === c ? "border-gray-600 scale-110" : "border-transparent"
@@ -680,6 +850,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           )}
         </div>
+        {/* END LEFT — Document */}
 
         {/* ════ RIGHT — AI Chat ════ */}
         <div className="w-96 flex flex-col bg-white flex-shrink-0">
@@ -774,9 +945,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   </svg>
                 </div>
                 <div className="bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-3 py-2.5 flex gap-1">
-                  {[0,150,300].map((d) => (
-                    <span key={d} className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"
-                      style={{ animationDelay: `${d}ms` }}/>
+                  {[0, 150, 300].map((d) => (
+                    <span
+                      key={d}
+                      className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"
+                      style={{ animationDelay: `${d}ms` }}
+                    />
                   ))}
                 </div>
               </div>
@@ -809,10 +983,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
                       <span className="text-xs text-yellow-600 ml-2 flex-shrink-0">
-                        {p.similarity > 0 
-                        ? `${Math.round(p.similarity * 100)}% match`
-                        : "keyword match"
-                         }
+                        {p.similarity > 0
+                          ? `${Math.round(p.similarity * 100)}% match`
+                          : "keyword match"}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">

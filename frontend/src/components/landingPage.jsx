@@ -4,8 +4,8 @@ const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 const features = [
   {
-    title: "OIDC / OAuth 2.0",
-    desc: "Full OpenID Connect with nonce, state, and PKCE validation via AWS Cognito.",
+    title: "Enterprise-grade security",
+    desc: "Built with modern authentication standards to ensure reliable and protected access.",
     bg: "bg-blue-50",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="#185FA5">
@@ -14,8 +14,8 @@ const features = [
     ),
   },
   {
-    title: "Secure sessions",
-    desc: "HttpOnly cookies with auto-expiry and server-side destroy on logout.",
+    title: "Protected user sessions",
+    desc: "Session handling designed for smooth and secure user experiences across devices.",
     bg: "bg-emerald-50",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -25,8 +25,8 @@ const features = [
     ),
   },
   {
-    title: "User profile",
-    desc: "Claims fetched from Cognito and surfaced across your app via session.",
+    title: "Personalized experience",
+    desc: "Dynamic user information and preferences integrated seamlessly throughout the platform.",
     bg: "bg-violet-50",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="#534AB7">
@@ -36,8 +36,8 @@ const features = [
     ),
   },
   {
-    title: "Env-driven config",
-    desc: "All secrets live in .env — no hardcoded credentials anywhere.",
+    title: "Flexible configuration",
+    desc: "Easily adaptable setup designed for scalability, deployment, and maintenance.",
     bg: "bg-green-50",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -188,7 +188,7 @@ export default function LandingPage() {
               href={`${AUTH_URL}/login`}
               className="px-6 py-2.5 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
             >
-              View docs
+              Login
             </a>
           </div>
         </section>
