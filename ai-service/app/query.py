@@ -548,6 +548,8 @@ _EXPANSIONS = {
     "keywords":        "keywords key terms",
 }
 
+# ── Core retrieve ─────────────────────────────────────────────────────────────
+
 async def retrieve(
     question: str,
     org_id:   str,
@@ -556,19 +558,18 @@ async def retrieve(
 ) -> list[dict]:
 
     q_lower  = question.lower().strip()
-    expanded = _EXPANSIONS.get(q_lower, question)
-    if expanded != question:
-        print(f"[RETRIEVE] Expanded {question!r} → {expanded!r}")
 
-    # ── Run keyword + vector in parallel ──
-    # Extract search terms: original word + expanded words
+    # Extract keywords from question
     kw_terms = list(dict.fromkeys(
-        [q_lower] +
         [w for w in re.findall(r'\b[a-zA-Z]{4,}\b', q_lower) if w not in {
             "what", "where", "when", "which", "that", "this", "with", "from",
             "have", "will", "been", "were", "they", "them", "their"
         }]
     ))[:4]
+
+    # If no keywords extracted (e.g. single short word), use the whole question
+    if not kw_terms:
+        kw_terms = [q_lower]
 
     async def keyword_search():
         results = []
@@ -581,7 +582,6 @@ async def retrieve(
             if isinstance(b, list):
                 results.extend(b)
         print(f"[KW] terms={kw_terms} → {len(results)} chunks")
-        # Give keyword chunks a strong similarity score so they rank above poor vector results
         for c in results:
             if not c.get("similarity"):
                 c["similarity"] = 0.75
@@ -589,7 +589,7 @@ async def retrieve(
 
     async def vector_search():
         try:
-            query_vector = await embed_query(expanded)
+            query_vector = await embed_query(question)  # ← original question, no expansion
             result = await db_rpc("match_documents", {
                 "query_embedding": query_vector,
                 "match_count":     20,
@@ -605,11 +605,7 @@ async def retrieve(
 
     kw_chunks, vec_chunks = await asyncio.gather(keyword_search(), vector_search())
 
-    # ── Merge: keyword results first, then vector ──
-    # Keyword results are exact matches — always prioritise them
     combined = deduplicate(kw_chunks + vec_chunks)
-
-    # Sort by similarity descending
     combined.sort(key=lambda c: c.get("similarity", 0), reverse=True)
     combined = combined[:top_k]
 
