@@ -519,12 +519,16 @@ def build_context(chunks: list[dict], max_words: int = 1200) -> str:
 # ── Dedup ─────────────────────────────────────────────────────────────────────
 
 def deduplicate(chunks: list[dict]) -> list[dict]:
-    seen_texts = set()
-    result     = []
+    seen = set()
+    result = []
     for c in chunks:
-        key = c.get("chunk_text", "")[:100].lower().strip()
-        if key not in seen_texts:
-            seen_texts.add(key)
+        # Use chunk_index from metadata as unique key if available
+        meta = c.get("metadata") or {}
+        key  = meta.get("chunk_index")
+        if key is None:
+            key = c.get("chunk_text", "")[:200].lower().strip()
+        if key not in seen:
+            seen.add(key)
             result.append(c)
     return result
 
@@ -592,7 +596,8 @@ async def retrieve(
                 "filter_org_id":   org_id,
                 "filter_doc_name": doc_name or "",
             })
-            print(f"[VEC] → {len(result)} chunks, top sim={result[0].get('similarity',0):.3f if result else 0}")
+            top_sim = result[0].get('similarity', 0) if result else 0
+            print(f"[VEC] → {len(result)} chunks, top sim={top_sim:.3f}")
             return result
         except Exception as e:
             print(f"[VEC ERROR] {e}")
