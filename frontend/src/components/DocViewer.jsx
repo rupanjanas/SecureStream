@@ -809,7 +809,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
                       <span className="text-xs text-yellow-600 ml-2 flex-shrink-0">
-                        {Math.round(p.similarity * 100)}% match
+                        {p.similarity > 0 
+                        ? `${Math.round(p.similarity * 100)}% match`
+                        : "keyword match"
+                         }
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
