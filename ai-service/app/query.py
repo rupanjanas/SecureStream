@@ -519,10 +519,9 @@ def build_context(chunks: list[dict], max_words: int = 1200) -> str:
 # ── Dedup ─────────────────────────────────────────────────────────────────────
 
 def deduplicate(chunks: list[dict]) -> list[dict]:
-    seen = set()
+    seen   = set()
     result = []
     for c in chunks:
-        # Use chunk_index from metadata as unique key if available
         meta = c.get("metadata") or {}
         key  = meta.get("chunk_index")
         if key is None:
@@ -535,21 +534,6 @@ def deduplicate(chunks: list[dict]) -> list[dict]:
 
 # ── Core retrieve ─────────────────────────────────────────────────────────────
 
-# Query expansions for single-word section queries
-_EXPANSIONS = {
-    "abstract":        "abstract summary overview of the project",
-    "introduction":    "introduction background motivation",
-    "conclusion":      "conclusion findings summary results",
-    "methodology":     "methodology approach methods system design",
-    "results":         "results findings evaluation performance",
-    "references":      "references bibliography citations",
-    "acknowledgement": "acknowledgement gratitude thanks",
-    "acknowledgements":"acknowledgement gratitude thanks",
-    "keywords":        "keywords key terms",
-}
-
-# ── Core retrieve ─────────────────────────────────────────────────────────────
-
 async def retrieve(
     question: str,
     org_id:   str,
@@ -557,17 +541,20 @@ async def retrieve(
     top_k:    int = 5,
 ) -> list[dict]:
 
-    q_lower  = question.lower().strip()
+    q_lower = question.lower().strip()
 
-    # Extract keywords from question
+    # Extract meaningful keywords — 4+ letter words, skip common filler
+    _SKIP = {
+        "what", "where", "when", "which", "that", "this", "with", "from",
+        "have", "will", "been", "were", "they", "them", "their", "about",
+        "does", "show", "tell", "give", "find", "list", "please",
+    }
     kw_terms = list(dict.fromkeys(
-        [w for w in re.findall(r'\b[a-zA-Z]{4,}\b', q_lower) if w not in {
-            "what", "where", "when", "which", "that", "this", "with", "from",
-            "have", "will", "been", "were", "they", "them", "their"
-        }]
+        w for w in re.findall(r'\b[a-zA-Z]{4,}\b', q_lower)
+        if w not in _SKIP
     ))[:4]
 
-    # If no keywords extracted (e.g. single short word), use the whole question
+    # Single short word not caught by regex (e.g. "nlp", "ai")
     if not kw_terms:
         kw_terms = [q_lower]
 
@@ -581,22 +568,29 @@ async def retrieve(
         for b in batches:
             if isinstance(b, list):
                 results.extend(b)
-        print(f"[KW] terms={kw_terms} → {len(results)} chunks")
+
+        # Score keyword chunks by how many times the keyword appears
+        # More occurrences = the chunk is more centrally about this topic
         for c in results:
             if not c.get("similarity"):
-                c["similarity"] = 0.75
+                text  = c.get("chunk_text", "").lower()
+                count = sum(text.count(kw.lower()) for kw in kw_terms)
+                # Base 0.6, +0.05 per extra occurrence, capped at 0.95
+                c["similarity"] = min(0.6 + 0.05 * (count - 1), 0.95)
+
+        print(f"[KW] terms={kw_terms} → {len(results)} chunks")
         return results
 
     async def vector_search():
         try:
-            query_vector = await embed_query(question)  # ← original question, no expansion
+            query_vector = await embed_query(question)
             result = await db_rpc("match_documents", {
                 "query_embedding": query_vector,
                 "match_count":     20,
                 "filter_org_id":   org_id,
                 "filter_doc_name": doc_name or "",
             })
-            top_sim = result[0].get('similarity', 0) if result else 0
+            top_sim = result[0].get("similarity", 0) if result else 0
             print(f"[VEC] → {len(result)} chunks, top sim={top_sim:.3f}")
             return result
         except Exception as e:
@@ -605,6 +599,8 @@ async def retrieve(
 
     kw_chunks, vec_chunks = await asyncio.gather(keyword_search(), vector_search())
 
+    # Keyword chunks first — they are exact matches and always more reliable
+    # than a low-similarity vector result
     combined = deduplicate(kw_chunks + vec_chunks)
     combined.sort(key=lambda c: c.get("similarity", 0), reverse=True)
     combined = combined[:top_k]
@@ -612,9 +608,11 @@ async def retrieve(
     print(f"[RETRIEVE] final={len(combined)} chunks")
     for i, c in enumerate(combined):
         meta = c.get("metadata") or {}
-        print(f"  [{i}] page={meta.get('page_number')} "
-              f"sim={c.get('similarity',0):.3f} "
-              f"text={c.get('chunk_text','')[:60]!r}")
+        print(
+            f"  [{i}] page={meta.get('page_number')} "
+            f"sim={c.get('similarity', 0):.3f} "
+            f"text={c.get('chunk_text', '')[:60]!r}"
+        )
 
     return combined
 
