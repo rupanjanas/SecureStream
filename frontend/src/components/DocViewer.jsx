@@ -11,7 +11,7 @@ import {
   toggleShareAnnotation,
   getOrgMembers,
   getOnlineMembers,
-  pingPresence
+  pingPresence,
 } from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -24,8 +24,8 @@ const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
-
-// ── Storage helpers — centralised so the key logic is in one place ──────────
+const issuedAt = Date.now();
+// ── Storage helpers ──────────────────────────────────────────────────────────
 function chatKey(docName)    { return `chat_v2_${docName}`; }
 function sourcesKey(docName) { return `sources_v2_${docName}`; }
 
@@ -33,16 +33,12 @@ function loadFromStorage(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 
 function saveToStorage(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
 }
-
-// ────────────────────────────────────────────────────────────────────────────
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -55,7 +51,7 @@ function highlightText(text, phrases) {
     const regex = new RegExp(`(${pattern})`, "gi");
     return text.split(regex).map((part) => ({
       text: part,
-      highlight: phrases.some((p) => p.toLowerCase() === part.toLowerCase())
+      highlight: phrases.some((p) => p.toLowerCase() === part.toLowerCase()),
     }));
   } catch {
     return [{ text, highlight: false }];
@@ -90,6 +86,7 @@ function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+// ── Member Avatar ────────────────────────────────────────────────────────────
 function MemberAvatar({ member, isOnline, isCurrent }) {
   const [showTip, setShowTip] = useState(false);
   return (
@@ -118,13 +115,10 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
   );
 }
 
-// ── Sources Panel — full history grouped by question ─────────────────────────
+// ── Sources Panel ────────────────────────────────────────────────────────────
 function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
-  // newest first so latest question is at top
   const groups = [...sourcesHistory].reverse();
   const totalPassages = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
-
-  // track which groups are collapsed; default all expanded
   const [collapsed, setCollapsed] = useState({});
   const toggle = (idx) => setCollapsed((s) => ({ ...s, [idx]: !s[idx] }));
 
@@ -133,7 +127,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
       className="flex flex-col bg-white border-l border-gray-200 z-40 shadow-xl flex-shrink-0"
       style={{ width: "320px", height: "100%" }}
     >
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-amber-50 flex-shrink-0">
         <div>
           <p className="text-sm font-semibold text-gray-900">Source history</p>
@@ -144,7 +137,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
         <button
           onClick={onClose}
           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
-          aria-label="Close sources panel"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -152,7 +144,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
         </button>
       </div>
 
-      {/* Body */}
       <div className="flex-1 overflow-y-auto">
         {groups.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full pb-10 text-center px-6">
@@ -165,7 +156,9 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
               </svg>
             </div>
             <p className="text-xs font-medium text-gray-600 mb-1">No sources yet</p>
-            <p className="text-xs text-gray-400 leading-relaxed">Ask a question in the chat. Matched passages will appear here, grouped by question.</p>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Ask a question in the chat. Matched passages will appear here, grouped by question.
+            </p>
           </div>
         ) : (
           <div className="py-2">
@@ -174,7 +167,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
               const passages    = group.passages || [];
               return (
                 <div key={group.id || gIdx} className="mb-0.5">
-                  {/* Question row */}
                   <button
                     onClick={() => toggle(gIdx)}
                     className="w-full flex items-start gap-2.5 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
@@ -195,24 +187,20 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
                       </p>
                     </div>
                   </button>
-
-                  {/* Passages */}
                   {!isCollapsed && (
                     <div className="px-3 pb-2 flex flex-col gap-1.5">
                       {passages.length === 0 ? (
-                        <p className="text-xs text-gray-400 px-2 py-1.5 italic">No passages found for this question.</p>
+                        <p className="text-xs text-gray-400 px-2 py-1.5 italic">No passages found.</p>
                       ) : (
                         passages.map((p, pIdx) => (
                           <div
                             key={pIdx}
                             onClick={() => {
                               if (!isPDF) {
-                                // For text docs, find the mark that corresponds to this passage
                                 const marks = document.querySelectorAll("mark");
                                 if (marks[pIdx]) marks[pIdx].scrollIntoView({ behavior: "smooth", block: "center" });
                               } else {
-                                const targetPage = p.page_number || 1;
-                                const pageEl = pageRefs.current[targetPage];
+                                const pageEl = pageRefs.current[p.page_number || 1];
                                 if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
                               }
                             }}
@@ -227,11 +215,9 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
                                 <span className="truncate">{p.doc_name}</span>
                               </span>
                               <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ml-2 ${
-                                p.similarity > 0.7
-                                  ? "bg-green-50 text-green-700"
-                                  : p.similarity > 0.4
-                                  ? "bg-amber-50 text-amber-700"
-                                  : "bg-gray-100 text-gray-500"
+                                p.similarity > 0.7 ? "bg-green-50 text-green-700"
+                                : p.similarity > 0.4 ? "bg-amber-50 text-amber-700"
+                                : "bg-gray-100 text-gray-500"
                               }`}>
                                 {p.similarity > 0 ? `${Math.round(p.similarity * 100)}%` : "kw"}
                               </span>
@@ -252,11 +238,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
                       )}
                     </div>
                   )}
-
-                  {/* Divider between groups */}
-                  {gIdx < groups.length - 1 && (
-                    <div className="mx-4 border-b border-gray-100"/>
-                  )}
+                  {gIdx < groups.length - 1 && <div className="mx-4 border-b border-gray-100"/>}
                 </div>
               );
             })}
@@ -264,7 +246,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
         )}
       </div>
 
-      {/* Footer — total summary */}
       {groups.length > 0 && (
         <div className="flex-shrink-0 border-t border-gray-100 px-4 py-2.5 bg-gray-50 flex items-center justify-between">
           <span className="text-xs text-gray-400">Showing all sessions for this doc</span>
@@ -280,17 +261,26 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   );
 }
 
-// ── Invite Modal ─────────────────────────────────────────────────────────────
-function InviteModal({ orgName, onClose }) {
-  const [copied, setCopied]           = useState(false);
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole]   = useState("member");
+// ── Invite Modal — generates a real signed invite link ───────────────────────
+function InviteModal({ orgName, onClose, token }) {
+  const [copied, setCopied]               = useState(false);
+  const [inviteEmail, setInviteEmail]     = useState("");
+  const [inviteRole, setInviteRole]       = useState("member");
   const [sendingInvite, setSendingInvite] = useState(false);
-  const [inviteSent, setInviteSent]   = useState(false);
-  const [inviteError, setInviteError] = useState("");
-  const [inviteToken] = useState(() => btoa(`${orgName}:invite:${Date.now()}`));
-
-  const inviteLink = `${window.location.origin}/join?org=${encodeURIComponent(orgName)}&token=${inviteToken}`;
+  const [inviteSent, setInviteSent]       = useState(false);
+  const [inviteError, setInviteError]     = useState("");
+  
+  // The invite link carries the org name and a signed token so the join page
+  // can verify it and land the user directly in the org workspace without an
+  // extra "request to join" step.
+  const invitePayload = btoa(
+    JSON.stringify({ org: orgName, role: inviteRole, iat: issuedAt })
+  );
+  const inviteLink =
+    `${window.location.origin}/join` +
+    `?org=${encodeURIComponent(orgName)}` +
+    `&token=${encodeURIComponent(invitePayload)}` +
+    `&role=${encodeURIComponent(inviteRole)}`;
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteLink).then(() => {
@@ -307,8 +297,22 @@ function InviteModal({ orgName, onClose }) {
     setInviteError("");
     setSendingInvite(true);
     try {
-      // Replace with real API call: await inviteOrgMember(inviteEmail, inviteRole, token)
-      await new Promise((r) => setTimeout(r, 900));
+      // POST to your backend so it can send a real email with the invite link
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+        method:  "POST",
+        headers: {
+          "Content-Type":  "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          email:    inviteEmail.trim(),
+          role:     inviteRole,
+          org_name: orgName,
+          // The backend can embed the same link in the email body
+          invite_link: inviteLink,
+        }),
+      });
+      if (!res.ok) throw new Error("Server error");
       setInviteSent(true);
       setInviteEmail("");
       setTimeout(() => setInviteSent(false), 3000);
@@ -325,7 +329,7 @@ function InviteModal({ orgName, onClose }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50">
           <div>
             <p className="text-sm font-semibold text-gray-900">Invite to {orgName}</p>
-            <p className="text-xs text-gray-500">Send a link or email invitation</p>
+            <p className="text-xs text-gray-500">Invited users land directly in the workspace</p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 rounded-lg p-1 hover:bg-gray-100 transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -335,6 +339,26 @@ function InviteModal({ orgName, onClose }) {
         </div>
 
         <div className="px-5 py-4 flex flex-col gap-5">
+          {/* Role selector affects the link too */}
+          <div>
+            <p className="text-xs font-medium text-gray-700 mb-2">Invite as</p>
+            <div className="flex gap-2">
+              {["member", "admin", "viewer"].map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setInviteRole(r)}
+                  className={`flex-1 py-1.5 rounded-xl text-xs font-medium border transition-colors capitalize ${
+                    inviteRole === r
+                      ? "bg-emerald-600 text-white border-emerald-600"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-emerald-300"
+                  }`}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
             <div className="flex gap-2">
@@ -352,7 +376,9 @@ function InviteModal({ orgName, onClose }) {
                 {copied ? "✓ Copied" : "Copy"}
               </button>
             </div>
-            <p className="text-xs text-gray-400 mt-1.5">Anyone with this link can request to join the org.</p>
+            <p className="text-xs text-gray-400 mt-1.5">
+              Anyone with this link joins as <strong>{inviteRole}</strong> and lands directly in the org workspace.
+            </p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -372,15 +398,6 @@ function InviteModal({ orgName, onClose }) {
                 placeholder="colleague@company.com"
                 className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 transition-colors"
               />
-              <select
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value)}
-                className="border border-gray-200 rounded-xl px-2 py-2 text-xs bg-white focus:outline-none focus:border-emerald-400 text-gray-700"
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-                <option value="viewer">Viewer</option>
-              </select>
             </div>
             {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
             {inviteSent  && <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>}
@@ -504,7 +521,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                       onClick={() => handleRemove(member)}
                       disabled={removingId === member.user_sub}
                       className="flex-shrink-0 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors disabled:opacity-40"
-                      title="Remove member"
                     >
                       {removingId === member.user_sub ? "…" : (
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -522,154 +538,169 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
         </div>
 
         <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex-shrink-0">
-          <p className="text-xs text-gray-400 text-center">Only admins can remove members or change roles. Changes take effect immediately.</p>
+          <p className="text-xs text-gray-400 text-center">
+            Only admins can remove members or change roles. Changes take effect immediately.
+          </p>
         </div>
       </div>
     </div>
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-
+// ── Main Page ────────────────────────────────────────────────────────────────
 export default function DocViewerPage({ user, mode, orgName }) {
-  const location  = useLocation();
-  const navigate  = useNavigate();
-  const docName   = location.state?.docName || "Document";
-  const docText   = location.state?.docText || "";
-  const isOrg     = mode === "org";
-  const isPDF     = docName.toLowerCase().endsWith(".pdf");
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  // Stable keys derived from docName — used for storage
+  const docName = location.state?.docName || "Document";
+  const docText = location.state?.docText || "";
+  // file_url is set by the org workspace when navigating to a shared doc;
+  // it's undefined when opening a personal doc from a local blob.
+  const fileUrl = location.state?.file_url || null;
+
+  const isOrg = mode === "org";
+  const isPDF = docName.toLowerCase().endsWith(".pdf");
+
   const CHAT_KEY    = chatKey(docName);
   const SOURCES_KEY = sourcesKey(docName);
 
-  // ── State ──
-  const [editingId, setEditingId]         = useState(null);
-  const [editNote, setEditNote]           = useState("");
-  const [deletingId, setDeletingId]       = useState(null);
-  const [remoteCursors, setRemoteCursors] = useState({});
-  const [onlineEmails, setOnlineEmails]   = useState([]);
-  const [chatHistory, setChatHistory]     = useState([]);
-  const [numPages, setNumPages]           = useState(null);
-  const [fetchedText, setFetchedText]     = useState("");
-  const [input, setInput]                 = useState("");
-  const [loading, setLoading]             = useState(false);
-  const [highlights, setHighlights]       = useState([]);
-  const [highlightedPages, setHighlightedPages] = useState({});
-  const [annotations, setAnnotations]           = useState([]);
-  const [activeAnnotation, setActiveAnnotation] = useState(null);
-  const [newNote, setNewNote]                   = useState("");
-  const [selectedText, setSelectedText]         = useState("");
-  const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
-  const [showNotePanel, setShowNotePanel]       = useState(false);
-  const [savingNote, setSavingNote]             = useState(false);
-  const [sharingId, setSharingId]               = useState(null);
-  const [members, setMembers]                   = useState([]);
-  const [onlineSet, setOnlineSet]               = useState(new Set());
-  const [showSourcesPanel, setShowSourcesPanel] = useState(false);
-  const [showInviteModal, setShowInviteModal]   = useState(false);
-  const [showMembersModal, setShowMembersModal] = useState(false);
+  // ── Auth token — fetched once, stored in a ref so hooks always see latest ──
+  const tokenRef = useRef(null);
+  const [tokenReady, setTokenReady] = useState(false);
 
-  // ── FIX 1: messages — load from the correct doc-specific key at init time ──
-  // The lazy initializer captures docName from the outer closure at mount, which
-  // is stable because this component unmounts when you navigate away. Using the
-  // helper functions instead of a template literal inside the initializer makes
-  // the intent clear and keeps the key logic DRY.
+  useEffect(() => {
+    fetch(`${AUTH_URL}/`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => {
+        tokenRef.current = d.access_token || "dev-token";
+        setTokenReady(true);
+      })
+      .catch(() => {
+        tokenRef.current = "dev-token";
+        setTokenReady(true);
+      });
+  }, []);
+
+  // ── State ──────────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState(() =>
     loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
   );
-
-  // ── FIX 2: sourcesHistory — accumulated per-question source groups, doc-specific ──
-  // Each entry: { id, question, passages, timestamp }
-  // We derive the "current" sourcePassages from the last entry so all downstream
-  // highlight/scroll logic that references sourcePassages continues to work unchanged.
   const [sourcesHistory, setSourcesHistory] = useState(() =>
     loadFromStorage(sourcesKey(docName), [])
   );
+  const [chatHistory, setChatHistory]         = useState([]);
+  const [input, setInput]                     = useState("");
+  const [loading, setLoading]                 = useState(false);
+  const [highlights, setHighlights]           = useState([]);
+  const [highlightedPages, setHighlightedPages] = useState({});
+  const [numPages, setNumPages]               = useState(null);
+  const [fetchedText, setFetchedText]         = useState("");
+  const [annotations, setAnnotations]         = useState([]);
+  const [activeAnnotation, setActiveAnnotation] = useState(null);
+  const [newNote, setNewNote]                 = useState("");
+  const [selectedText, setSelectedText]       = useState("");
+  const [noteColor, setNoteColor]             = useState(ANNOTATION_COLORS[0]);
+  const [showNotePanel, setShowNotePanel]     = useState(false);
+  const [savingNote, setSavingNote]           = useState(false);
+  const [editingId, setEditingId]             = useState(null);
+  const [editNote, setEditNote]               = useState("");
+  const [deletingId, setDeletingId]           = useState(null);
+  const [sharingId, setSharingId]             = useState(null);
+  const [members, setMembers]                 = useState([]);
+  const [onlineSet, setOnlineSet]             = useState(new Set());
+  const [showSourcesPanel, setShowSourcesPanel] = useState(false);
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showMembersModal, setShowMembersModal] = useState(false);
+  const [remoteCursors, setRemoteCursors]     = useState({});
+  const [onlineEmails, setOnlineEmails]       = useState([]);
 
-  // Derived: passages from the most recent question (for inline chat panel + highlights)
+  // ── Refs ───────────────────────────────────────────────────────────────────
+  const pageRefs  = useRef({});
+  const pdfUrlRef = useRef(null);
+  const bottomRef = useRef(null);
+
+  const userEmail = user?.email || "dev@securestream.local";
+
+  // Derived: latest source passages (for inline panel + highlights)
   const sourcePassages = sourcesHistory.length > 0
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
 
-  // ── Refs ──
-  const pageRefs  = useRef({});
-  const pdfUrlRef = useRef(null);
-  const bottomRef = useRef(null);
-  const tokenRef  = useRef(null);
-
-  const userEmail = user?.email || "dev@securestream.local";
-
-  // ── PDF blob URL — created once ──
+  // ── PDF blob URL ───────────────────────────────────────────────────────────
+  // FIX: org docs use `file_url` (remote Supabase URL), not the local blob.
+  //      Personal docs use the local File object from retrieveFile().
+  //      This prevents org members from accidentally loading another user's
+  //      local file and prevents personal blobs from leaking into the org view.
   const pdfFile = useMemo(() => {
     if (!isPDF) return null;
-    if (pdfUrlRef.current) return { url: pdfUrlRef.current };
-    const fromState = location.state?.file;
-    const fileObj   = fromState instanceof File ? fromState : retrieveFile();
-    if (!fileObj) return null;
-    const url = URL.createObjectURL(fileObj);
-    pdfUrlRef.current = url;
-    return { url };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  // ── Cleanup blob URL on unmount ──
+    // Org workspace — always use the remote URL stored in Supabase
+    if (isOrg && fileUrl) {
+      return { url: fileUrl };
+    }
+
+    // Personal workspace — use the local blob (uploaded by this browser session)
+    if (!isOrg) {
+      if (pdfUrlRef.current) return { url: pdfUrlRef.current };
+      const fromState = location.state?.file;
+      const fileObj   = fromState instanceof File ? fromState : retrieveFile();
+      if (!fileObj) return null;
+      const url = URL.createObjectURL(fileObj);
+      pdfUrlRef.current = url;
+      return { url };
+    }
+
+    return null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPDF, isOrg, fileUrl]);
+
+  // Revoke personal blob on unmount (org URLs are remote, no cleanup needed)
   useEffect(() => {
     return () => {
-      if (pdfUrlRef.current) {
+      if (!isOrg && pdfUrlRef.current) {
         URL.revokeObjectURL(pdfUrlRef.current);
         pdfUrlRef.current = null;
       }
     };
-  }, []);
+  }, [isOrg]);
 
-  // ── Persist messages (only settled, non-empty) whenever they change ──
-  // docName is in the dep array so if the component somehow re-renders with a
-  // new docName (edge case) we write to the correct key.
+  // ── Persist messages ───────────────────────────────────────────────────────
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
     if (settled.length === 0) return;
     saveToStorage(CHAT_KEY, settled);
   }, [messages, CHAT_KEY]);
 
-  // ── Persist sources history whenever it changes ──
+  // ── Persist sources history ────────────────────────────────────────────────
   useEffect(() => {
     if (sourcesHistory.length === 0) return;
     saveToStorage(SOURCES_KEY, sourcesHistory);
   }, [sourcesHistory, SOURCES_KEY]);
 
-  // ── Fetch token once ──
+  // ── Load document text ─────────────────────────────────────────────────────
   useEffect(() => {
-    fetch(`${AUTH_URL}/`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => { tokenRef.current = d.access_token || "dev-token"; })
-      .catch(() => { tokenRef.current = "dev-token"; });
-  }, []);
-
-  // ── Load document text ──
-  useEffect(() => {
-    if (!docName) return;
+    if (!docName || !tokenReady) return;
     const t = setTimeout(async () => {
       try {
-        const res = await getDocumentText(docName, tokenRef.current || "dev-token");
+        const res = await getDocumentText(docName, tokenRef.current);
         setFetchedText(res.text || "");
       } catch { /* silent */ }
     }, 400);
     return () => clearTimeout(t);
-  }, [docName]);
+  }, [docName, tokenReady]);
 
-  // ── Load annotations ──
+  // ── Load annotations ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (!docName) return;
+    if (!docName || !tokenReady) return;
     const t = setTimeout(() => {
-      getAnnotations(docName, tokenRef.current || "dev-token")
+      getAnnotations(docName, tokenRef.current)
         .then((d) => setAnnotations(Array.isArray(d) ? d : []))
         .catch(() => setAnnotations([]));
     }, 400);
     return () => clearTimeout(t);
-  }, [docName]);
+  }, [docName, tokenReady]);
 
-  // ── Org: members + online ──
+  // ── Org: members + online presence ────────────────────────────────────────
   useEffect(() => {
     if (!isOrg) return;
     const fetchAll = async () => {
@@ -684,7 +715,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     return () => clearInterval(interval);
   }, [isOrg]);
 
-  // ── Org: ping presence ──
   useEffect(() => {
     if (!isOrg) return;
     pingPresence();
@@ -692,39 +722,40 @@ export default function DocViewerPage({ user, mode, orgName }) {
     return () => clearInterval(interval);
   }, [isOrg]);
 
-  // ── Auto-scroll chat ──
+  // ── Auto-scroll chat ───────────────────────────────────────────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // ── Collaboration hook ──
+  // ── Collaboration hook ─────────────────────────────────────────────────────
+  // FIX: only mount the WS hook after the token is ready, so we never connect
+  //      with a null token.
   const { sendCursor, sendAnnotationEvent } = useDocCollaboration({
     docName,
-    orgId:   isOrg ? orgName : null,
-    email:   userEmail,
-    token:   tokenRef.current,
-    onCursor: (msg) => {
+    orgId:  isOrg && tokenReady ? orgName : null,   // null disables the hook
+    email:  userEmail,
+    token:  tokenRef.current,
+    onCursor: useCallback((msg) => {
       setRemoteCursors((prev) => ({
         ...prev,
-        [msg.email]: { x: msg.x, y: msg.y, page: msg.page }
+        [msg.email]: { x: msg.x, y: msg.y, page: msg.page },
       }));
-    },
-    onAnnotationEvent: (msg) => {
-      if (msg.action === "create") {
+    }, []),
+    onAnnotationEvent: useCallback((msg) => {
+      if (msg.action === "create")
         setAnnotations((a) => [...a, msg.data]);
-      } else if (msg.action === "update") {
+      else if (msg.action === "update")
         setAnnotations((a) => a.map((ann) => ann.id === msg.data.id ? msg.data : ann));
-      } else if (msg.action === "delete") {
+      else if (msg.action === "delete")
         setAnnotations((a) => a.filter((ann) => ann.id !== msg.data.id));
-      }
-    },
-    onPresence: (msg) => {
+    }, []),
+    onPresence: useCallback((msg) => {
       if (msg.event === "joined") setOnlineEmails((e) => [...new Set([...e, msg.email])]);
       if (msg.event === "left")   setOnlineEmails((e) => e.filter((x) => x !== msg.email));
-    },
+    }, []),
   });
 
-  // ── Handlers ──
+  // ── Handlers ───────────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e) => {
     if (!isOrg) return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -753,9 +784,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
         selected_text: selectedText,
         note:          newNote.trim(),
         color:         noteColor,
-        is_shared:     false
-      }, tokenRef.current || "dev-token");
+        is_shared:     false,
+      }, tokenRef.current);
       setAnnotations((a) => [...a, ann]);
+      sendAnnotationEvent("create", ann);
       setNewNote("");
       setSelectedText("");
       setShowNotePanel(false);
@@ -774,10 +806,11 @@ export default function DocViewerPage({ user, mode, orgName }) {
         selected_text: ann.selected_text,
         note:          editNote.trim(),
         color:         ann.color,
-      }, tokenRef.current || "dev-token");
+      }, tokenRef.current);
       setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, note: updated.note } : a));
       if (activeAnnotation?.id === ann.id)
         setActiveAnnotation((a) => ({ ...a, note: updated.note }));
+      sendAnnotationEvent("update", { ...ann, note: updated.note });
       setEditingId(null);
       setEditNote("");
     } catch (err) {
@@ -788,9 +821,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const handleDeleteAnnotation = async (ann) => {
     setDeletingId(ann.id);
     try {
-      await deleteAnnotation(ann.id, tokenRef.current || "dev-token");
+      await deleteAnnotation(ann.id, tokenRef.current);
       setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
       if (activeAnnotation?.id === ann.id) setActiveAnnotation(null);
+      sendAnnotationEvent("delete", { id: ann.id });
     } catch (err) {
       console.error("Delete error:", err);
     } finally {
@@ -801,12 +835,13 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const handleToggleShare = async (ann) => {
     setSharingId(ann.id);
     try {
-      const updated = await toggleShareAnnotation(ann.id, !ann.is_shared, tokenRef.current || "dev-token");
+      const updated = await toggleShareAnnotation(ann.id, !ann.is_shared, tokenRef.current);
       setAnnotations((prev) =>
         prev.map((a) => a.id === ann.id ? { ...a, is_shared: updated.is_shared } : a)
       );
       if (activeAnnotation?.id === ann.id)
         setActiveAnnotation((a) => ({ ...a, is_shared: updated.is_shared }));
+      sendAnnotationEvent("update", { ...ann, is_shared: updated.is_shared });
     } catch (err) {
       console.error("Share error:", err);
     } finally {
@@ -814,11 +849,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
-  // ── Member management handlers ──
   const handleRemoveMember = async (member) => {
     try {
-      // Replace with: await removeOrgMember(member.user_sub, tokenRef.current)
-      await new Promise((r) => setTimeout(r, 600));
+      await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}`, {
+        method:  "DELETE",
+        headers: { Authorization: `Bearer ${tokenRef.current}` },
+      });
       setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
     } catch (err) {
       console.error("Remove member error:", err);
@@ -827,8 +863,14 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   const handleChangeRole = async (member, newRole) => {
     try {
-      // Replace with: await updateOrgMemberRole(member.user_sub, newRole, tokenRef.current)
-      await new Promise((r) => setTimeout(r, 400));
+      await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}/role`, {
+        method:  "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization:  `Bearer ${tokenRef.current}`,
+        },
+        body: JSON.stringify({ role: newRole }),
+      });
       setMembers((prev) =>
         prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m)
       );
@@ -837,28 +879,29 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
-  // ── Send ──
+  // ── Send question ──────────────────────────────────────────────────────────
   const send = async () => {
     const question = input.trim();
     if (!question || loading) return;
+
     const newHistory = [...chatHistory, { role: "user", content: question }];
     setChatHistory(newHistory);
     setMessages((m) => [
       ...m.filter((msg) => !msg.streaming),
       { role: "user", content: question },
-      { role: "assistant", content: "", streaming: true }
+      { role: "assistant", content: "", streaming: true },
     ]);
     setInput("");
     setLoading(true);
     setHighlights([]);
     setHighlightedPages({});
-    // Note: we do NOT reset sourcesHistory here — we append to it below
 
     try {
       await askQuestionStream(
         question,
         docName,
         newHistory,
+        // token callback
         (token) => {
           setMessages((m) => {
             const updated = [...m];
@@ -867,22 +910,22 @@ export default function DocViewerPage({ user, mode, orgName }) {
             return updated;
           });
         },
+        // done callback
         (sources, passages) => {
-          setChatHistory((h) => [...h, {
-            role:    "assistant",
-            content: passages.length > 0 ? "..." : "Not found"
-          }]);
+          setChatHistory((h) => [
+            ...h,
+            { role: "assistant", content: passages.length > 0 ? "..." : "Not found" },
+          ]);
           setMessages((m) => {
             const updated = [...m];
             updated[updated.length - 1] = {
               ...updated[updated.length - 1],
               streaming: false,
-              sources
+              sources,
             };
             return updated;
           });
 
-          // ── Append a new source group to history ──
           const newGroup = {
             id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             question,
@@ -898,7 +941,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
           )];
           setHighlights(phrases);
 
-          // ── PDF scroll + highlight ──
           if (isPDF && passages?.length > 0) {
             const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
             const pageHighlights = {};
@@ -908,10 +950,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
               pageHighlights[pg].push(p.passage.slice(0, 120));
             });
             setHighlightedPages(pageHighlights);
-
-            const targetPage = sorted[0].page_number || 1;
             setTimeout(() => {
-              const pageEl = pageRefs.current[targetPage];
+              const pageEl = pageRefs.current[sorted[0].page_number || 1];
               if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
             }, 400);
           }
@@ -927,7 +967,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
         updated[updated.length - 1] = {
           ...updated[updated.length - 1],
           content:   `Error: ${err.message}`,
-          streaming: false
+          streaming: false,
         };
         return updated;
       });
@@ -935,7 +975,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
-  // ── Derived values ──
+  // ── Derived ────────────────────────────────────────────────────────────────
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
   const sharedAnnotations = safeAnnotations.filter((a) => a.is_shared && a.user_email !== userEmail);
@@ -947,13 +987,17 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const accentBtn   = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
   const accentFocus = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
-      {/* Modals */}
       {showInviteModal && (
-        <InviteModal orgName={orgName} onClose={() => setShowInviteModal(false)} />
+        <InviteModal
+          orgName={orgName}
+          token={tokenRef.current}
+          onClose={() => setShowInviteModal(false)}
+        />
       )}
       {showMembersModal && (
         <ManageMembersModal
@@ -973,7 +1017,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
           {/* Toolbar */}
           <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
-            isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
+            isOrg
+              ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200"
+              : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center gap-3 min-w-0">
               <button
@@ -985,8 +1031,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
               <span className="text-gray-200">|</span>
               {isOrg && (
                 <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-1">
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                     <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
                     <circle cx="9" cy="7" r="4"/>
                     <path d="M23 21v-2a4 4 0 00-3-3.87"/>
@@ -1009,7 +1054,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   {highlights.length} highlights
                 </span>
               )}
-              {/* Sources panel toggle — always visible once there's any history */}
               {sourcesHistory.length > 0 && (
                 <button
                   onClick={() => setShowSourcesPanel((v) => !v)}
@@ -1029,6 +1073,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
               <span className="text-xs text-gray-400">
                 {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
               </span>
+
               {isOrg && members.length > 0 && (
                 <div className="flex items-center gap-2 pl-2 border-l border-emerald-200">
                   <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
@@ -1211,9 +1256,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                               if (!pageEl) return;
                               const spans = pageEl.querySelectorAll(".react-pdf__Page__textContent span");
                               spans.forEach((span) => {
-                                const text    = span.textContent.toLowerCase();
                                 const matched = highlightedPages[pageNum].some((phrase) =>
-                                  text.includes(phrase.toLowerCase().slice(0, 40))
+                                  span.textContent.toLowerCase().includes(
+                                    phrase.toLowerCase().slice(0, 40)
+                                  )
                                 );
                                 if (matched) {
                                   span.style.backgroundColor = "rgba(254, 240, 138, 0.7)";
@@ -1234,8 +1280,14 @@ export default function DocViewerPage({ user, mode, orgName }) {
                         <polyline points="14 2 14 8 20 8"/>
                       </svg>
                     </div>
-                    <p className="text-sm text-gray-500 mb-1">PDF preview not available</p>
-                    <p className="text-xs text-gray-400">Refresh the page or re-upload the document</p>
+                    <p className="text-sm text-gray-500 mb-1">
+                      {isOrg ? "PDF could not be loaded from storage." : "PDF preview not available"}
+                    </p>
+                    <p className="text-xs text-gray-400">
+                      {isOrg
+                        ? "The file URL may have expired. Re-upload from the dashboard."
+                        : "Refresh the page or re-upload the document."}
+                    </p>
                   </div>
                 )}
               </div>
@@ -1264,7 +1316,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
                       {parts.map((part, i) =>
                         part.highlight ? (
-                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5 transition-all">
+                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5">
                             {part.text}
                           </mark>
                         ) : (
@@ -1294,7 +1346,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 style={{ position: "absolute", left: pos.x, top: pos.y, pointerEvents: "none", zIndex: 50 }}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16">
-                  <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5" />
+                  <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5"/>
                 </svg>
                 <span className="text-xs bg-[#185FA5] text-white px-1 rounded ml-1 whitespace-nowrap">
                   {email.split("@")[0]}
@@ -1302,7 +1354,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
               </div>
             ))}
           </div>
-          {/* END Document content */}
 
           {/* Note panel */}
           {showNotePanel && (
@@ -1333,9 +1384,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     }`}
                   />
                 ))}
-                <span className="ml-auto text-xs text-gray-400">
-                  {isOrg ? "Share with team anytime" : "Starts private · share anytime"}
-                </span>
               </div>
               <div className="flex gap-2">
                 <input
@@ -1358,9 +1406,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           )}
         </div>
-        {/* END LEFT — Document */}
+        {/* END LEFT */}
 
-        {/* ════ MIDDLE — Sources panel (when open, sits between doc and chat) ════ */}
+        {/* ════ MIDDLE — Sources panel ════ */}
         {showSourcesPanel && (
           <SourcesPanel
             sourcesHistory={sourcesHistory}
@@ -1424,11 +1472,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     ? "Ask anything about this shared document."
                     : "Ask anything. Matching passages are highlighted automatically."}
                 </p>
-                {!isPDF && (
-                  <p className="text-xs text-gray-400 mt-2">
-                    Select text to add a {isOrg ? "team" : "private"} annotation.
-                  </p>
-                )}
               </div>
             )}
 
@@ -1484,7 +1527,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             <div ref={bottomRef}/>
           </div>
 
-          {/* Inline source passages — latest question only, quick access */}
+          {/* Inline source passages */}
           {sourcePassages.length > 0 && (
             <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-gray-50">
               <div className="flex items-center justify-between mb-2">
@@ -1494,9 +1537,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 <button
                   onClick={() => setShowSourcesPanel((v) => !v)}
                   className={`text-xs transition-colors flex items-center gap-1 ${
-                    showSourcesPanel
-                      ? "text-amber-700 font-medium"
-                      : "text-gray-400 hover:text-amber-600"
+                    showSourcesPanel ? "text-amber-700 font-medium" : "text-gray-400 hover:text-amber-600"
                   }`}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -1516,12 +1557,11 @@ export default function DocViewerPage({ user, mode, orgName }) {
                         const marks = document.querySelectorAll("mark");
                         if (marks[i]) marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
                       } else {
-                        const targetPage = p.page_number || 1;
-                        const pageEl = pageRefs.current[targetPage];
+                        const pageEl = pageRefs.current[p.page_number || 1];
                         if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
                       }
                     }}
-                    className="bg-white border border-yellow-200 rounded-lg px-3 py-2 transition-colors cursor-pointer hover:border-yellow-400"
+                    className="bg-white border border-yellow-200 rounded-lg px-3 py-2 cursor-pointer hover:border-yellow-400 transition-colors"
                   >
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
@@ -1568,12 +1608,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </p>
           </div>
         </div>
-        {/* END RIGHT — AI Chat */}
+        {/* END RIGHT */}
 
       </main>
     </div>
   );
 }
-
-
-

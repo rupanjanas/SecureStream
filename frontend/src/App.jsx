@@ -8,6 +8,7 @@ import UploadPage     from "./components/UploadPage";
 import ChatPage       from "./components/ChatPage";
 import DocViewerPage  from "./components/DocViewer";
 import WorkspaceSelectPage from "./components/WorkSpaceSelect";
+import JoinPage from "./components/joinPage";
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 function ProtectedRoute({ user, children }) {
@@ -59,6 +60,7 @@ export default function App() {
         <Route path="/"                 element={<LandingPage />} />
         <Route path="/onboarding"       element={<OnboardingPage />} />
         <Route path="/org-setup"        element={<OrgSetupPage />} />
+        <Route path="/join"             element={<JoinPage user={user} />} />
         <Route path="/workspace-select" element={
   <ProtectedRoute user={user}>
     <WorkspaceSelectPage
