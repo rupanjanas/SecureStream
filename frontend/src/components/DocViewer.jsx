@@ -25,6 +25,25 @@ const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
 
+// ── Storage helpers — centralised so the key logic is in one place ──────────
+function chatKey(docName)    { return `chat_v2_${docName}`; }
+function sourcesKey(docName) { return `sources_v2_${docName}`; }
+
+function loadFromStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveToStorage(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -66,6 +85,11 @@ function getAvatarColor(email) {
   return palettes[Math.abs(h) % palettes.length];
 }
 
+function fmtTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function MemberAvatar({ member, isOnline, isCurrent }) {
   const [showTip, setShowTip] = useState(false);
   return (
@@ -94,93 +118,179 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
   );
 }
 
-// ── NEW: Sources Panel ──────────────────────────────────────────────────────
-function SourcesPanel({ sourcePassages, isPDF, pageRefs, onClose }) {
+// ── Sources Panel — full history grouped by question ─────────────────────────
+function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
+  // newest first so latest question is at top
+  const groups = [...sourcesHistory].reverse();
+  const totalPassages = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
+
+  // track which groups are collapsed; default all expanded
+  const [collapsed, setCollapsed] = useState({});
+  const toggle = (idx) => setCollapsed((s) => ({ ...s, [idx]: !s[idx] }));
+
   return (
-    <div className="fixed right-0 top-0 h-full w-80 bg-white border-l border-gray-200 z-40 flex flex-col shadow-xl"
-      style={{ top: "57px", height: "calc(100vh - 57px)" }}>
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-yellow-50">
+    <div
+      className="flex flex-col bg-white border-l border-gray-200 z-40 shadow-xl flex-shrink-0"
+      style={{ width: "320px", height: "100%" }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-amber-50 flex-shrink-0">
         <div>
-          <p className="text-sm font-semibold text-gray-900">Sources</p>
-          <p className="text-xs text-gray-400">{sourcePassages.length} passage{sourcePassages.length !== 1 ? "s" : ""} found</p>
+          <p className="text-sm font-semibold text-gray-900">Source history</p>
+          <p className="text-xs text-gray-500">
+            {groups.length} question{groups.length !== 1 ? "s" : ""} · {totalPassages} passage{totalPassages !== 1 ? "s" : ""}
+          </p>
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+        <button
+          onClick={onClose}
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+          aria-label="Close sources panel"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
-        {sourcePassages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center pt-16 text-center">
-            <div className="w-10 h-10 bg-yellow-50 rounded-xl flex items-center justify-center mb-3">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ca8a04" strokeWidth="2" strokeLinecap="round">
-                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto">
+        {groups.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full pb-10 text-center px-6">
+            <div className="w-11 h-11 bg-amber-50 rounded-2xl flex items-center justify-center mb-3">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b45309" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="9" y1="15" x2="15" y2="15"/>
+                <line x1="9" y1="11" x2="15" y2="11"/>
               </svg>
             </div>
-            <p className="text-xs text-gray-400">No sources yet. Ask a question to see matching passages.</p>
+            <p className="text-xs font-medium text-gray-600 mb-1">No sources yet</p>
+            <p className="text-xs text-gray-400 leading-relaxed">Ask a question in the chat. Matched passages will appear here, grouped by question.</p>
           </div>
         ) : (
-          sourcePassages.map((p, i) => (
-            <div
-              key={i}
-              onClick={() => {
-                if (!isPDF) {
-                  const marks = document.querySelectorAll("mark");
-                  if (marks[i]) marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
-                } else {
-                  const targetPage = p.page_number || 1;
-                  const pageEl = pageRefs.current[targetPage];
-                  if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-              }}
-              className="bg-white border border-yellow-200 rounded-xl px-3 py-3 cursor-pointer hover:border-yellow-400 hover:bg-yellow-50 transition-all"
-            >
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-medium text-gray-700 truncate flex items-center gap-1">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-                  </svg>
-                  {p.doc_name}
-                </span>
-                <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ml-2 ${
-                  p.similarity > 0.7
-                    ? "bg-green-50 text-green-700"
-                    : p.similarity > 0.4
-                    ? "bg-yellow-50 text-yellow-700"
-                    : "bg-gray-100 text-gray-500"
-                }`}>
-                  {p.similarity > 0 ? `${Math.round(p.similarity * 100)}%` : "kw"}
-                </span>
-              </div>
-              <p className="text-xs text-gray-600 leading-relaxed line-clamp-3">
-                {p.passage.slice(0, 160)}...
-              </p>
-              {p.page_number && (
-                <p className="text-xs text-gray-400 mt-1.5 flex items-center gap-1">
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="3" y="3" width="18" height="18" rx="2"/>
-                  </svg>
-                  Page {p.page_number}
-                </p>
-              )}
-            </div>
-          ))
+          <div className="py-2">
+            {groups.map((group, gIdx) => {
+              const isCollapsed = collapsed[gIdx];
+              const passages    = group.passages || [];
+              return (
+                <div key={group.id || gIdx} className="mb-0.5">
+                  {/* Question row */}
+                  <button
+                    onClick={() => toggle(gIdx)}
+                    className="w-full flex items-start gap-2.5 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
+                  >
+                    <div className="w-4 h-4 rounded bg-amber-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                      <svg
+                        width="8" height="8" viewBox="0 0 24 24" fill="none"
+                        stroke="#b45309" strokeWidth="3" strokeLinecap="round"
+                        className={`transition-transform duration-200 ${isCollapsed ? "-rotate-90" : ""}`}
+                      >
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-gray-800 leading-snug line-clamp-2">{group.question}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {fmtTime(group.timestamp)} · {passages.length} source{passages.length !== 1 ? "s" : ""}
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Passages */}
+                  {!isCollapsed && (
+                    <div className="px-3 pb-2 flex flex-col gap-1.5">
+                      {passages.length === 0 ? (
+                        <p className="text-xs text-gray-400 px-2 py-1.5 italic">No passages found for this question.</p>
+                      ) : (
+                        passages.map((p, pIdx) => (
+                          <div
+                            key={pIdx}
+                            onClick={() => {
+                              if (!isPDF) {
+                                // For text docs, find the mark that corresponds to this passage
+                                const marks = document.querySelectorAll("mark");
+                                if (marks[pIdx]) marks[pIdx].scrollIntoView({ behavior: "smooth", block: "center" });
+                              } else {
+                                const targetPage = p.page_number || 1;
+                                const pageEl = pageRefs.current[targetPage];
+                                if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                              }
+                            }}
+                            className="ml-6 bg-white border border-amber-100 hover:border-amber-300 hover:bg-amber-50 rounded-lg px-3 py-2.5 cursor-pointer transition-all group"
+                          >
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xs text-gray-500 truncate flex items-center gap-1 min-w-0">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0">
+                                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                  <polyline points="14 2 14 8 20 8"/>
+                                </svg>
+                                <span className="truncate">{p.doc_name}</span>
+                              </span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ml-2 ${
+                                p.similarity > 0.7
+                                  ? "bg-green-50 text-green-700"
+                                  : p.similarity > 0.4
+                                  ? "bg-amber-50 text-amber-700"
+                                  : "bg-gray-100 text-gray-500"
+                              }`}>
+                                {p.similarity > 0 ? `${Math.round(p.similarity * 100)}%` : "kw"}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-600 leading-relaxed line-clamp-2 group-hover:line-clamp-none transition-all">
+                              {p.passage.slice(0, 180)}{p.passage.length > 180 ? "…" : ""}
+                            </p>
+                            {p.page_number && (
+                              <p className="text-xs text-gray-400 mt-1.5 flex items-center gap-1">
+                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                </svg>
+                                Page {p.page_number}
+                              </p>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+
+                  {/* Divider between groups */}
+                  {gIdx < groups.length - 1 && (
+                    <div className="mx-4 border-b border-gray-100"/>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
+
+      {/* Footer — total summary */}
+      {groups.length > 0 && (
+        <div className="flex-shrink-0 border-t border-gray-100 px-4 py-2.5 bg-gray-50 flex items-center justify-between">
+          <span className="text-xs text-gray-400">Showing all sessions for this doc</span>
+          <button
+            onClick={() => setCollapsed(groups.reduce((acc, _, i) => ({ ...acc, [i]: true }), {}))}
+            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            Collapse all
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-// ── NEW: Invite Modal ────────────────────────────────────────────────────────
+// ── Invite Modal ─────────────────────────────────────────────────────────────
 function InviteModal({ orgName, onClose }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied]           = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("member");
+  const [inviteRole, setInviteRole]   = useState("member");
   const [sendingInvite, setSendingInvite] = useState(false);
-  const [inviteSent, setInviteSent] = useState(false);
+  const [inviteSent, setInviteSent]   = useState(false);
   const [inviteError, setInviteError] = useState("");
+  const [inviteToken] = useState(() => btoa(`${orgName}:invite:${Date.now()}`));
 
-  const inviteLink = useMemo(
-    () => `${window.location.origin}/join?org=${encodeURIComponent(orgName)}&token=${btoa(orgName + ":invite:")}`,
-    [orgName]
-  );
+  const inviteLink = `${window.location.origin}/join?org=${encodeURIComponent(orgName)}&token=${inviteToken}`;
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteLink).then(() => {
@@ -197,7 +307,7 @@ function InviteModal({ orgName, onClose }) {
     setInviteError("");
     setSendingInvite(true);
     try {
-      // Placeholder: replace with real invite API call
+      // Replace with real API call: await inviteOrgMember(inviteEmail, inviteRole, token)
       await new Promise((r) => setTimeout(r, 900));
       setInviteSent(true);
       setInviteEmail("");
@@ -212,7 +322,6 @@ function InviteModal({ orgName, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50">
           <div>
             <p className="text-sm font-semibold text-gray-900">Invite to {orgName}</p>
@@ -226,11 +335,10 @@ function InviteModal({ orgName, onClose }) {
         </div>
 
         <div className="px-5 py-4 flex flex-col gap-5">
-          {/* Invite link section */}
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
             <div className="flex gap-2">
-              <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-500 truncate select-all">
+              <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-500 truncate select-all font-mono">
                 {inviteLink}
               </div>
               <button
@@ -253,7 +361,6 @@ function InviteModal({ orgName, onClose }) {
             <div className="flex-1 h-px bg-gray-100"/>
           </div>
 
-          {/* Email invite section */}
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Send email invitation</p>
             <div className="flex gap-2 mb-2">
@@ -275,18 +382,14 @@ function InviteModal({ orgName, onClose }) {
                 <option value="viewer">Viewer</option>
               </select>
             </div>
-            {inviteError && (
-              <p className="text-xs text-red-500 mb-2">{inviteError}</p>
-            )}
-            {inviteSent && (
-              <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>
-            )}
+            {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
+            {inviteSent  && <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>}
             <button
               onClick={handleSendInvite}
               disabled={!inviteEmail.trim() || sendingInvite}
               className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-medium rounded-xl transition-colors"
             >
-              {sendingInvite ? "Sending..." : "Send invite"}
+              {sendingInvite ? "Sending…" : "Send invite"}
             </button>
           </div>
         </div>
@@ -295,7 +398,7 @@ function InviteModal({ orgName, onClose }) {
   );
 }
 
-// ── NEW: Manage Members Modal ────────────────────────────────────────────────
+// ── Manage Members Modal ─────────────────────────────────────────────────────
 function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMember, onChangeRole }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [removingId, setRemovingId]   = useState(null);
@@ -310,26 +413,19 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
   const handleRemove = async (member) => {
     if (member.email === userEmail) return;
     setRemovingId(member.user_sub);
-    try {
-      await onRemoveMember(member);
-    } finally {
-      setRemovingId(null);
-    }
+    try { await onRemoveMember(member); }
+    finally { setRemovingId(null); }
   };
 
   const handleRoleChange = async (member, newRole) => {
     setUpdatingId(member.user_sub);
-    try {
-      await onChangeRole(member, newRole);
-    } finally {
-      setUpdatingId(null);
-    }
+    try { await onChangeRole(member, newRole); }
+    finally { setUpdatingId(null); }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden flex flex-col max-h-[80vh]">
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50 flex-shrink-0">
           <div>
             <p className="text-sm font-semibold text-gray-900">Manage members</p>
@@ -342,7 +438,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
           </button>
         </div>
 
-        {/* Search */}
         <div className="px-5 py-3 border-b border-gray-100 flex-shrink-0">
           <div className="relative">
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -352,13 +447,12 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search members..."
+              placeholder="Search members…"
               className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-emerald-400 transition-colors"
             />
           </div>
         </div>
 
-        {/* Members list */}
         <div className="flex-1 overflow-y-auto px-5 py-3 flex flex-col gap-2">
           {filtered.length === 0 ? (
             <p className="text-xs text-gray-400 text-center py-8">No members found.</p>
@@ -373,15 +467,12 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                     isCurrentUser ? "border-emerald-200 bg-emerald-50" : "border-gray-100 hover:bg-gray-50"
                   }`}
                 >
-                  {/* Avatar */}
                   <div className="relative flex-shrink-0">
                     <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${getAvatarColor(member.email)}`}>
                       {getInitials(member.email)}
                     </div>
                     <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white ${isOnline ? "bg-emerald-400" : "bg-gray-300"}`}/>
                   </div>
-
-                  {/* Info */}
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-gray-900 truncate">
                       {member.email?.split("@")[0]}
@@ -389,13 +480,9 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                     </p>
                     <p className="text-xs text-gray-400 truncate">{member.email}</p>
                   </div>
-
-                  {/* Status badge */}
                   <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${isOnline ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
                     {isOnline ? "Online" : "Offline"}
                   </span>
-
-                  {/* Role selector */}
                   {!isCurrentUser ? (
                     <select
                       value={member.role || "member"}
@@ -412,8 +499,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                       {member.role || "member"}
                     </span>
                   )}
-
-                  {/* Remove button */}
                   {!isCurrentUser && (
                     <button
                       onClick={() => handleRemove(member)}
@@ -421,9 +506,10 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                       className="flex-shrink-0 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors disabled:opacity-40"
                       title="Remove member"
                     >
-                      {removingId === member.user_sub ? "..." : (
+                      {removingId === member.user_sub ? "…" : (
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                          <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+                          <polyline points="3 6 5 6 21 6"/>
+                          <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
                           <path d="M10 11v6"/><path d="M14 11v6"/>
                         </svg>
                       )}
@@ -435,16 +521,15 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex-shrink-0">
-          <p className="text-xs text-gray-400 text-center">
-            Only admins can remove members or change roles. Changes take effect immediately.
-          </p>
+          <p className="text-xs text-gray-400 text-center">Only admins can remove members or change roles. Changes take effect immediately.</p>
         </div>
       </div>
     </div>
   );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
 
 export default function DocViewerPage({ user, mode, orgName }) {
   const location  = useLocation();
@@ -453,6 +538,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const docText   = location.state?.docText || "";
   const isOrg     = mode === "org";
   const isPDF     = docName.toLowerCase().endsWith(".pdf");
+
+  // Stable keys derived from docName — used for storage
+  const CHAT_KEY    = chatKey(docName);
+  const SOURCES_KEY = sourcesKey(docName);
 
   // ── State ──
   const [editingId, setEditingId]         = useState(null);
@@ -467,7 +556,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [loading, setLoading]             = useState(false);
   const [highlights, setHighlights]       = useState([]);
   const [highlightedPages, setHighlightedPages] = useState({});
-  const [sourcePassages, setSourcePassages]     = useState([]);
   const [annotations, setAnnotations]           = useState([]);
   const [activeAnnotation, setActiveAnnotation] = useState(null);
   const [newNote, setNewNote]                   = useState("");
@@ -478,11 +566,31 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [sharingId, setSharingId]               = useState(null);
   const [members, setMembers]                   = useState([]);
   const [onlineSet, setOnlineSet]               = useState(new Set());
+  const [showSourcesPanel, setShowSourcesPanel] = useState(false);
+  const [showInviteModal, setShowInviteModal]   = useState(false);
+  const [showMembersModal, setShowMembersModal] = useState(false);
 
-  // ── NEW state for added UIs ──
-  const [showSourcesPanel, setShowSourcesPanel]       = useState(false);
-  const [showInviteModal, setShowInviteModal]         = useState(false);
-  const [showMembersModal, setShowMembersModal]       = useState(false);
+  // ── FIX 1: messages — load from the correct doc-specific key at init time ──
+  // The lazy initializer captures docName from the outer closure at mount, which
+  // is stable because this component unmounts when you navigate away. Using the
+  // helper functions instead of a template literal inside the initializer makes
+  // the intent clear and keeps the key logic DRY.
+  const [messages, setMessages] = useState(() =>
+    loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
+  );
+
+  // ── FIX 2: sourcesHistory — accumulated per-question source groups, doc-specific ──
+  // Each entry: { id, question, passages, timestamp }
+  // We derive the "current" sourcePassages from the last entry so all downstream
+  // highlight/scroll logic that references sourcePassages continues to work unchanged.
+  const [sourcesHistory, setSourcesHistory] = useState(() =>
+    loadFromStorage(sourcesKey(docName), [])
+  );
+
+  // Derived: passages from the most recent question (for inline chat panel + highlights)
+  const sourcePassages = sourcesHistory.length > 0
+    ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
+    : [];
 
   // ── Refs ──
   const pageRefs  = useRef({});
@@ -515,31 +623,20 @@ export default function DocViewerPage({ user, mode, orgName }) {
     };
   }, []);
 
-  // ── Chat persistence ──
-  const CHAT_KEY = `chat_${docName}`;
-
-  const [messages, setMessages] = useState(() => {
-    try {
-      const saved = localStorage.getItem(CHAT_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // ── Clear stuck streaming messages on mount ──
-  useEffect(() => {
-    setMessages((m) => m.filter((msg) => !msg.streaming && msg.content));
-  }, []);
-
-  // ── Persist settled messages ──
+  // ── Persist messages (only settled, non-empty) whenever they change ──
+  // docName is in the dep array so if the component somehow re-renders with a
+  // new docName (edge case) we write to the correct key.
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
     if (settled.length === 0) return;
-    try {
-      localStorage.setItem(CHAT_KEY, JSON.stringify(settled));
-    } catch { /* storage full */ }
+    saveToStorage(CHAT_KEY, settled);
   }, [messages, CHAT_KEY]);
+
+  // ── Persist sources history whenever it changes ──
+  useEffect(() => {
+    if (sourcesHistory.length === 0) return;
+    saveToStorage(SOURCES_KEY, sourcesHistory);
+  }, [sourcesHistory, SOURCES_KEY]);
 
   // ── Fetch token once ──
   useEffect(() => {
@@ -717,10 +814,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
-  // ── NEW: Member management handlers ──
+  // ── Member management handlers ──
   const handleRemoveMember = async (member) => {
     try {
-      // Placeholder: replace with real API call e.g. removeOrgMember(member.user_sub)
+      // Replace with: await removeOrgMember(member.user_sub, tokenRef.current)
       await new Promise((r) => setTimeout(r, 600));
       setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
     } catch (err) {
@@ -730,7 +827,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   const handleChangeRole = async (member, newRole) => {
     try {
-      // Placeholder: replace with real API call e.g. updateOrgMemberRole(member.user_sub, newRole)
+      // Replace with: await updateOrgMemberRole(member.user_sub, newRole, tokenRef.current)
       await new Promise((r) => setTimeout(r, 400));
       setMembers((prev) =>
         prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m)
@@ -740,6 +837,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
+  // ── Send ──
   const send = async () => {
     const question = input.trim();
     if (!question || loading) return;
@@ -753,8 +851,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setInput("");
     setLoading(true);
     setHighlights([]);
-    setSourcePassages([]);
     setHighlightedPages({});
+    // Note: we do NOT reset sourcesHistory here — we append to it below
 
     try {
       await askQuestionStream(
@@ -784,13 +882,21 @@ export default function DocViewerPage({ user, mode, orgName }) {
             return updated;
           });
 
+          // ── Append a new source group to history ──
+          const newGroup = {
+            id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            question,
+            passages:  passages || [],
+            timestamp: Date.now(),
+          };
+          setSourcesHistory((prev) => [...prev, newGroup]);
+
           const phrases = [...new Set(
             (passages || [])
               .sort((a, b) => b.similarity - a.similarity)
               .map((p) => p.passage.slice(0, 120))
           )];
           setHighlights(phrases);
-          setSourcePassages(passages || []);
 
           // ── PDF scroll + highlight ──
           if (isPDF && passages?.length > 0) {
@@ -836,6 +942,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const displayText       = docText || fetchedText;
   const parts             = highlightText(displayText, highlights);
   const onlineCount       = onlineSet.size;
+  const totalSourceCount  = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
 
   const accentBtn   = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
   const accentFocus = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
@@ -844,7 +951,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
-      {/* ── NEW: Modals ── */}
+      {/* Modals */}
       {showInviteModal && (
         <InviteModal orgName={orgName} onClose={() => setShowInviteModal(false)} />
       )}
@@ -862,7 +969,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
       <main className="flex overflow-hidden" style={{ height: "calc(100vh - 57px)" }}>
 
         {/* ════ LEFT — Document ════ */}
-        <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-100 bg-white">
+        <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-100 bg-white min-w-0">
 
           {/* Toolbar */}
           <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
@@ -896,34 +1003,34 @@ export default function DocViewerPage({ user, mode, orgName }) {
               </span>
             </div>
 
-            <div className="flex items-center gap-3 flex-shrink-0">
+            <div className="flex items-center gap-2 flex-shrink-0">
               {!isPDF && highlights.length > 0 && (
                 <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-lg">
                   {highlights.length} highlights
                 </span>
               )}
-              {/* ── NEW: Sources button (visible when there are source passages) ── */}
-              {sourcePassages.length > 0 && (
+              {/* Sources panel toggle — always visible once there's any history */}
+              {sourcesHistory.length > 0 && (
                 <button
                   onClick={() => setShowSourcesPanel((v) => !v)}
                   className={`text-xs px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-colors border ${
                     showSourcesPanel
-                      ? "bg-yellow-100 text-yellow-800 border-yellow-300"
-                      : "bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100"
+                      ? "bg-amber-100 text-amber-800 border-amber-300"
+                      : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
                   }`}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                     <polyline points="14 2 14 8 20 8"/>
                   </svg>
-                  {sourcePassages.length} source{sourcePassages.length !== 1 ? "s" : ""}
+                  {totalSourceCount} source{totalSourceCount !== 1 ? "s" : ""}
                 </button>
               )}
               <span className="text-xs text-gray-400">
                 {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
               </span>
               {isOrg && members.length > 0 && (
-                <div className="flex items-center gap-2 pl-3 border-l border-emerald-200">
+                <div className="flex items-center gap-2 pl-2 border-l border-emerald-200">
                   <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
                   <div className="flex -space-x-1.5">
                     {members.slice(0, 5).map((m) => (
@@ -940,11 +1047,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       </div>
                     )}
                   </div>
-                  {/* ── NEW: Manage members button ── */}
                   <button
                     onClick={() => setShowMembersModal(true)}
                     className="text-xs text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100 px-2 py-1 rounded-lg transition-colors border border-emerald-200 flex items-center gap-1"
-                    title="Manage members"
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                       <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
@@ -954,29 +1059,24 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     </svg>
                     Manage
                   </button>
-                  {/* ── NEW: Invite button ── */}
                   <button
                     onClick={() => setShowInviteModal(true)}
                     className={`text-xs text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}
-                    title="Invite members"
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
-                      <line x1="12" y1="5" x2="12" y2="19"/>
-                      <line x1="5" y1="12" x2="19" y2="12"/>
+                      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                     </svg>
                     Invite
                   </button>
                 </div>
               )}
-              {/* ── NEW: Invite button for orgs with no members yet ── */}
               {isOrg && members.length === 0 && (
                 <button
                   onClick={() => setShowInviteModal(true)}
                   className={`text-xs text-white px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
-                    <line x1="12" y1="5" x2="12" y2="19"/>
-                    <line x1="5" y1="12" x2="19" y2="12"/>
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
                   Invite
                 </button>
@@ -1028,7 +1128,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       "{activeAnnotation.selected_text?.slice(0, 80)}
                       {activeAnnotation.selected_text?.length > 80 ? "..." : ""}"
                     </p>
-
                     {editingId === activeAnnotation.id ? (
                       <div className="flex gap-2 mt-1">
                         <input
@@ -1039,38 +1138,20 @@ export default function DocViewerPage({ user, mode, orgName }) {
                           className="flex-1 border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-[#185FA5]"
                           autoFocus
                         />
-                        <button
-                          onClick={() => handleEditNote(activeAnnotation)}
-                          className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg"
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={() => { setEditingId(null); setEditNote(""); }}
-                          className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg"
-                        >
-                          Cancel
-                        </button>
+                        <button onClick={() => handleEditNote(activeAnnotation)} className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg">Save</button>
+                        <button onClick={() => { setEditingId(null); setEditNote(""); }} className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg">Cancel</button>
                       </div>
                     ) : (
                       <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
                     )}
                   </div>
-
                   <div className="flex items-center gap-1 ml-3 flex-shrink-0">
-                    {/* Edit button — owner only */}
                     {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
                       <button
-                        onClick={() => {
-                          setEditingId(activeAnnotation.id);
-                          setEditNote(activeAnnotation.note);
-                        }}
+                        onClick={() => { setEditingId(activeAnnotation.id); setEditNote(activeAnnotation.note); }}
                         className="text-xs text-gray-400 hover:text-gray-600 px-1.5 py-1 rounded hover:bg-gray-100"
-                      >
-                        Edit
-                      </button>
+                      >Edit</button>
                     )}
-                    {/* Delete button — owner only */}
                     {activeAnnotation.user_email === userEmail && (
                       <button
                         onClick={() => handleDeleteAnnotation(activeAnnotation)}
@@ -1080,16 +1161,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
                         {deletingId === activeAnnotation.id ? "..." : "Delete"}
                       </button>
                     )}
-                    <button
-                      onClick={() => setActiveAnnotation(null)}
-                      className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded"
-                    >
-                      ✕
-                    </button>
+                    <button onClick={() => setActiveAnnotation(null)} className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded">✕</button>
                   </div>
                 </div>
-
-                {/* Share toggle — owner only */}
                 {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
                   <button
                     onClick={() => handleToggleShare(activeAnnotation)}
@@ -1135,11 +1209,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
                               if (!highlightedPages[pageNum]?.length) return;
                               const pageEl = pageRefs.current[pageNum];
                               if (!pageEl) return;
-                              const spans = pageEl.querySelectorAll(
-                                ".react-pdf__Page__textContent span"
-                              );
+                              const spans = pageEl.querySelectorAll(".react-pdf__Page__textContent span");
                               spans.forEach((span) => {
-                                const text = span.textContent.toLowerCase();
+                                const text    = span.textContent.toLowerCase();
                                 const matched = highlightedPages[pageNum].some((phrase) =>
                                   text.includes(phrase.toLowerCase().slice(0, 40))
                                 );
@@ -1157,8 +1229,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 ) : (
                   <div className="flex flex-col items-center justify-center pt-20 text-center">
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-                        stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
                         <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                         <polyline points="14 2 14 8 20 8"/>
                       </svg>
@@ -1183,10 +1254,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                             style={{ borderColor: ann.color }}
                             className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5"
                           >
-                            <span
-                              style={{ backgroundColor: ann.color }}
-                              className="w-2 h-2 rounded-full inline-block"
-                            />
+                            <span style={{ backgroundColor: ann.color }} className="w-2 h-2 rounded-full inline-block"/>
                             "{ann.selected_text.slice(0, 25)}..."
                             {ann.is_shared && <span className="text-blue-400 ml-1">shared</span>}
                           </button>
@@ -1196,8 +1264,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
                       {parts.map((part, i) =>
                         part.highlight ? (
-                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }}
-                            className="rounded px-0.5 transition-all">
+                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5 transition-all">
                             {part.text}
                           </mark>
                         ) : (
@@ -1209,8 +1276,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 ) : (
                   <div className="flex flex-col items-center justify-center pt-20 text-center">
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-                        stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
                         <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                         <polyline points="14 2 14 8 20 8"/>
                       </svg>
@@ -1225,13 +1291,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             {Object.entries(remoteCursors).map(([email, pos]) => (
               <div
                 key={email}
-                style={{
-                  position:      "absolute",
-                  left:          pos.x,
-                  top:           pos.y,
-                  pointerEvents: "none",
-                  zIndex:        50,
-                }}
+                style={{ position: "absolute", left: pos.x, top: pos.y, pointerEvents: "none", zIndex: 50 }}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16">
                   <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5" />
@@ -1300,8 +1360,18 @@ export default function DocViewerPage({ user, mode, orgName }) {
         </div>
         {/* END LEFT — Document */}
 
+        {/* ════ MIDDLE — Sources panel (when open, sits between doc and chat) ════ */}
+        {showSourcesPanel && (
+          <SourcesPanel
+            sourcesHistory={sourcesHistory}
+            isPDF={isPDF}
+            pageRefs={pageRefs}
+            onClose={() => setShowSourcesPanel(false)}
+          />
+        )}
+
         {/* ════ RIGHT — AI Chat ════ */}
-        <div className="w-96 flex flex-col bg-white flex-shrink-0">
+        <div className="w-96 flex flex-col bg-white flex-shrink-0 border-l border-gray-100">
           <div className={`px-4 py-3 border-b flex-shrink-0 ${
             isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"
           }`}>
@@ -1310,7 +1380,15 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-semibold text-gray-900">Ask AI</p>
                   <button
-                    onClick={() => { localStorage.removeItem(CHAT_KEY); setMessages([]); }}
+                    onClick={() => {
+                      localStorage.removeItem(CHAT_KEY);
+                      localStorage.removeItem(SOURCES_KEY);
+                      setMessages([]);
+                      setSourcesHistory([]);
+                      setChatHistory([]);
+                      setHighlights([]);
+                      setHighlightedPages({});
+                    }}
                     className="text-xs text-gray-400 hover:text-red-400 transition-colors"
                   >
                     Clear
@@ -1406,20 +1484,19 @@ export default function DocViewerPage({ user, mode, orgName }) {
             <div ref={bottomRef}/>
           </div>
 
-          {/* Source passages */}
+          {/* Inline source passages — latest question only, quick access */}
           {sourcePassages.length > 0 && (
             <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-gray-50">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs font-medium text-gray-500">
-                  Sources ({sourcePassages.length})
+                  Latest sources ({sourcePassages.length})
                 </p>
-                {/* ── NEW: Open sources panel button ── */}
                 <button
                   onClick={() => setShowSourcesPanel((v) => !v)}
                   className={`text-xs transition-colors flex items-center gap-1 ${
                     showSourcesPanel
-                      ? "text-yellow-700 font-medium"
-                      : "text-gray-400 hover:text-yellow-600"
+                      ? "text-amber-700 font-medium"
+                      : "text-gray-400 hover:text-amber-600"
                   }`}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -1427,7 +1504,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <polyline points="15 3 21 3 21 9"/>
                     <line x1="10" y1="14" x2="21" y2="3"/>
                   </svg>
-                  {showSourcesPanel ? "Close panel" : "Open panel"}
+                  {showSourcesPanel ? "Close history" : `All history (${sourcesHistory.length})`}
                 </button>
               </div>
               <div className="flex flex-col gap-2 max-h-36 overflow-y-auto">
@@ -1449,9 +1526,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
                       <span className="text-xs text-yellow-600 ml-2 flex-shrink-0">
-                        {p.similarity > 0
-                          ? `${Math.round(p.similarity * 100)}% match`
-                          : "keyword match"}
+                        {p.similarity > 0 ? `${Math.round(p.similarity * 100)}% match` : "keyword match"}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
@@ -1482,8 +1557,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 disabled={!input.trim() || loading}
                 className={`px-3 rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-                  stroke="white" strokeWidth="2" strokeLinecap="round">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                   <line x1="22" y1="2" x2="11" y2="13"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
@@ -1494,17 +1568,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </p>
           </div>
         </div>
+        {/* END RIGHT — AI Chat */}
 
-        {/* ── NEW: Sources slide-over panel ── */}
-        {showSourcesPanel && (
-          <SourcesPanel
-            sourcePassages={sourcePassages}
-            isPDF={isPDF}
-            pageRefs={pageRefs}
-            onClose={() => setShowSourcesPanel(false)}
-          />
-        )}
       </main>
     </div>
   );
 }
+
+
+
