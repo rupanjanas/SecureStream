@@ -20,11 +20,10 @@ import { askQuestionStream, getDocumentText } from "../api/aiService";
 import { useDocCollaboration } from "../hooks/useDocCollaboration";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
-const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
-
+const AUTH_URL      = import.meta.env.VITE_BACKEND_URL;
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
-const issuedAt = Date.now();
+
 // ── Storage helpers ──────────────────────────────────────────────────────────
 function chatKey(docName)    { return `chat_v2_${docName}`; }
 function sourcesKey(docName) { return `sources_v2_${docName}`; }
@@ -102,13 +101,11 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
       </div>
       <span className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-white ${
         isOnline ? "bg-emerald-400" : "bg-gray-300"
-      }`}/>
+      }`} />
       {showTip && (
         <div className="absolute top-9 right-0 z-50 bg-gray-900 text-white text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">
           <p className="font-medium">{member.email?.split("@")[0]}</p>
-          <p className="text-gray-400 capitalize">
-            {member.role} · {isOnline ? "Online" : "Offline"}
-          </p>
+          <p className="text-gray-400 capitalize">{member.role} · {isOnline ? "Online" : "Offline"}</p>
         </div>
       )}
     </div>
@@ -117,16 +114,14 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
 
 // ── Sources Panel ────────────────────────────────────────────────────────────
 function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
-  const groups = [...sourcesHistory].reverse();
+  const groups        = [...sourcesHistory].reverse();
   const totalPassages = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
   const [collapsed, setCollapsed] = useState({});
   const toggle = (idx) => setCollapsed((s) => ({ ...s, [idx]: !s[idx] }));
 
   return (
-    <div
-      className="flex flex-col bg-white border-l border-gray-200 z-40 shadow-xl flex-shrink-0"
-      style={{ width: "320px", height: "100%" }}
-    >
+    <div className="flex flex-col bg-white border-l border-gray-200 z-40 shadow-xl flex-shrink-0"
+      style={{ width: "320px", height: "100%" }}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-amber-50 flex-shrink-0">
         <div>
           <p className="text-sm font-semibold text-gray-900">Source history</p>
@@ -134,10 +129,8 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
             {groups.length} question{groups.length !== 1 ? "s" : ""} · {totalPassages} passage{totalPassages !== 1 ? "s" : ""}
           </p>
         </div>
-        <button
-          onClick={onClose}
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
-        >
+        <button onClick={onClose}
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
@@ -157,7 +150,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
             </div>
             <p className="text-xs font-medium text-gray-600 mb-1">No sources yet</p>
             <p className="text-xs text-gray-400 leading-relaxed">
-              Ask a question in the chat. Matched passages will appear here, grouped by question.
+              Ask a question in the chat. Matched passages will appear here.
             </p>
           </div>
         ) : (
@@ -167,16 +160,11 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
               const passages    = group.passages || [];
               return (
                 <div key={group.id || gIdx} className="mb-0.5">
-                  <button
-                    onClick={() => toggle(gIdx)}
-                    className="w-full flex items-start gap-2.5 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
-                  >
+                  <button onClick={() => toggle(gIdx)}
+                    className="w-full flex items-start gap-2.5 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left">
                     <div className="w-4 h-4 rounded bg-amber-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <svg
-                        width="8" height="8" viewBox="0 0 24 24" fill="none"
-                        stroke="#b45309" strokeWidth="3" strokeLinecap="round"
-                        className={`transition-transform duration-200 ${isCollapsed ? "-rotate-90" : ""}`}
-                      >
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#b45309" strokeWidth="3" strokeLinecap="round"
+                        className={`transition-transform duration-200 ${isCollapsed ? "-rotate-90" : ""}`}>
                         <polyline points="6 9 12 15 18 9"/>
                       </svg>
                     </div>
@@ -193,8 +181,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
                         <p className="text-xs text-gray-400 px-2 py-1.5 italic">No passages found.</p>
                       ) : (
                         passages.map((p, pIdx) => (
-                          <div
-                            key={pIdx}
+                          <div key={pIdx}
                             onClick={() => {
                               if (!isPDF) {
                                 const marks = document.querySelectorAll("mark");
@@ -204,8 +191,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
                                 if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
                               }
                             }}
-                            className="ml-6 bg-white border border-amber-100 hover:border-amber-300 hover:bg-amber-50 rounded-lg px-3 py-2.5 cursor-pointer transition-all group"
-                          >
+                            className="ml-6 bg-white border border-amber-100 hover:border-amber-300 hover:bg-amber-50 rounded-lg px-3 py-2.5 cursor-pointer transition-all group">
                             <div className="flex items-center justify-between mb-1">
                               <span className="text-xs text-gray-500 truncate flex items-center gap-1 min-w-0">
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0">
@@ -251,8 +237,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
           <span className="text-xs text-gray-400">Showing all sessions for this doc</span>
           <button
             onClick={() => setCollapsed(groups.reduce((acc, _, i) => ({ ...acc, [i]: true }), {}))}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-          >
+            className="text-xs text-gray-400 hover:text-gray-600 transition-colors">
             Collapse all
           </button>
         </div>
@@ -261,7 +246,7 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   );
 }
 
-// ── Invite Modal — generates a real signed invite link ───────────────────────
+// ── Invite Modal ─────────────────────────────────────────────────────────────
 function InviteModal({ orgName, onClose, token }) {
   const [copied, setCopied]               = useState(false);
   const [inviteEmail, setInviteEmail]     = useState("");
@@ -269,12 +254,11 @@ function InviteModal({ orgName, onClose, token }) {
   const [sendingInvite, setSendingInvite] = useState(false);
   const [inviteSent, setInviteSent]       = useState(false);
   const [inviteError, setInviteError]     = useState("");
-  
-  // The invite link carries the org name and a signed token so the join page
-  // can verify it and land the user directly in the org workspace without an
-  // extra "request to join" step.
-  const invitePayload = btoa(
-    JSON.stringify({ org: orgName, role: inviteRole, iat: issuedAt })
+  const [issuedAt] = useState(() => Date.now());
+  // Recompute whenever role changes so the displayed link is always current
+  const invitePayload = useMemo(() =>
+    btoa(JSON.stringify({ org: orgName, role: inviteRole, iat: issuedAt })),
+    [orgName, inviteRole, issuedAt]
   );
   const inviteLink =
     `${window.location.origin}/join` +
@@ -297,18 +281,13 @@ function InviteModal({ orgName, onClose, token }) {
     setInviteError("");
     setSendingInvite(true);
     try {
-      // POST to your backend so it can send a real email with the invite link
       const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
         method:  "POST",
-        headers: {
-          "Content-Type":  "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          email:    inviteEmail.trim(),
-          role:     inviteRole,
-          org_name: orgName,
-          // The backend can embed the same link in the email body
+          email:       inviteEmail.trim(),
+          role:        inviteRole,
+          org_name:    orgName,
           invite_link: inviteLink,
         }),
       });
@@ -339,20 +318,16 @@ function InviteModal({ orgName, onClose, token }) {
         </div>
 
         <div className="px-5 py-4 flex flex-col gap-5">
-          {/* Role selector affects the link too */}
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Invite as</p>
             <div className="flex gap-2">
               {["member", "admin", "viewer"].map((r) => (
-                <button
-                  key={r}
-                  onClick={() => setInviteRole(r)}
+                <button key={r} onClick={() => setInviteRole(r)}
                   className={`flex-1 py-1.5 rounded-xl text-xs font-medium border transition-colors capitalize ${
                     inviteRole === r
                       ? "bg-emerald-600 text-white border-emerald-600"
                       : "bg-white text-gray-600 border-gray-200 hover:border-emerald-300"
-                  }`}
-                >
+                  }`}>
                   {r}
                 </button>
               ))}
@@ -365,14 +340,12 @@ function InviteModal({ orgName, onClose, token }) {
               <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-500 truncate select-all font-mono">
                 {inviteLink}
               </div>
-              <button
-                onClick={handleCopyLink}
+              <button onClick={handleCopyLink}
                 className={`px-3 py-2 rounded-xl text-xs font-medium transition-all flex-shrink-0 ${
                   copied
                     ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
                     : "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200"
-                }`}
-              >
+                }`}>
                 {copied ? "✓ Copied" : "Copy"}
               </button>
             </div>
@@ -389,23 +362,20 @@ function InviteModal({ orgName, onClose, token }) {
 
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Send email invitation</p>
-            <div className="flex gap-2 mb-2">
-              <input
-                type="email"
-                value={inviteEmail}
-                onChange={(e) => { setInviteEmail(e.target.value); setInviteError(""); }}
-                onKeyDown={(e) => e.key === "Enter" && handleSendInvite()}
-                placeholder="colleague@company.com"
-                className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 transition-colors"
-              />
-            </div>
+            <input
+              type="email"
+              value={inviteEmail}
+              onChange={(e) => { setInviteEmail(e.target.value); setInviteError(""); }}
+              onKeyDown={(e) => e.key === "Enter" && handleSendInvite()}
+              placeholder="colleague@company.com"
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 transition-colors mb-2"
+            />
             {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
             {inviteSent  && <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>}
             <button
               onClick={handleSendInvite}
               disabled={!inviteEmail.trim() || sendingInvite}
-              className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-medium rounded-xl transition-colors"
-            >
+              className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-medium rounded-xl transition-colors">
               {sendingInvite ? "Sending…" : "Send invite"}
             </button>
           </div>
@@ -427,19 +397,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
       m.role?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleRemove = async (member) => {
-    if (member.email === userEmail) return;
-    setRemovingId(member.user_sub);
-    try { await onRemoveMember(member); }
-    finally { setRemovingId(null); }
-  };
-
-  const handleRoleChange = async (member, newRole) => {
-    setUpdatingId(member.user_sub);
-    try { await onChangeRole(member, newRole); }
-    finally { setUpdatingId(null); }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden flex flex-col max-h-[80vh]">
@@ -460,13 +417,9 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search members…"
-              className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-emerald-400 transition-colors"
-            />
+              className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-emerald-400 transition-colors"/>
           </div>
         </div>
 
@@ -478,12 +431,10 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
               const isCurrentUser = member.email === userEmail;
               const isOnline      = onlineSet.has(member.user_sub);
               return (
-                <div
-                  key={member.user_sub}
+                <div key={member.user_sub}
                   className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${
                     isCurrentUser ? "border-emerald-200 bg-emerald-50" : "border-gray-100 hover:bg-gray-50"
-                  }`}
-                >
+                  }`}>
                   <div className="relative flex-shrink-0">
                     <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${getAvatarColor(member.email)}`}>
                       {getInitials(member.email)}
@@ -501,12 +452,13 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                     {isOnline ? "Online" : "Offline"}
                   </span>
                   {!isCurrentUser ? (
-                    <select
-                      value={member.role || "member"}
-                      onChange={(e) => handleRoleChange(member, e.target.value)}
+                    <select value={member.role || "member"}
+                      onChange={(e) => {
+                        setUpdatingId(member.user_sub);
+                        onChangeRole(member, e.target.value).finally(() => setUpdatingId(null));
+                      }}
                       disabled={updatingId === member.user_sub}
-                      className="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:border-emerald-400 text-gray-700 flex-shrink-0 disabled:opacity-50"
-                    >
+                      className="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:border-emerald-400 text-gray-700 flex-shrink-0 disabled:opacity-50">
                       <option value="member">Member</option>
                       <option value="admin">Admin</option>
                       <option value="viewer">Viewer</option>
@@ -518,10 +470,12 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
                   )}
                   {!isCurrentUser && (
                     <button
-                      onClick={() => handleRemove(member)}
+                      onClick={() => {
+                        setRemovingId(member.user_sub);
+                        onRemoveMember(member).finally(() => setRemovingId(null));
+                      }}
                       disabled={removingId === member.user_sub}
-                      className="flex-shrink-0 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors disabled:opacity-40"
-                    >
+                      className="flex-shrink-0 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors disabled:opacity-40">
                       {removingId === member.user_sub ? "…" : (
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                           <polyline points="3 6 5 6 21 6"/>
@@ -552,11 +506,14 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const docName = location.state?.docName || "Document";
-  const docText = location.state?.docText || "";
-  // file_url is set by the org workspace when navigating to a shared doc;
-  // it's undefined when opening a personal doc from a local blob.
-  const fileUrl = location.state?.file_url || null;
+  // Pull everything we need from navigation state once at the top.
+  // These never change for the lifetime of this page mount.
+  const {
+    docName  = "Document",
+    docText  = "",
+    file_url: fileUrl = null,
+    file:    stateFile = null,        // File object passed for personal PDFs
+  } = location.state || {};
 
   const isOrg = mode === "org";
   const isPDF = docName.toLowerCase().endsWith(".pdf");
@@ -564,21 +521,63 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const CHAT_KEY    = chatKey(docName);
   const SOURCES_KEY = sourcesKey(docName);
 
-  // ── Auth token — fetched once, stored in a ref so hooks always see latest ──
-  const tokenRef = useRef(null);
+  // ── Auth token ─────────────────────────────────────────────────────────────
+  const tokenRef     = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
 
   useEffect(() => {
     fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
-      .then((d) => {
-        tokenRef.current = d.access_token || "dev-token";
-        setTokenReady(true);
-      })
-      .catch(() => {
-        tokenRef.current = "dev-token";
-        setTokenReady(true);
-      });
+      .then((d) => { tokenRef.current = d.access_token || "dev-token"; setTokenReady(true); })
+      .catch(()  => { tokenRef.current = "dev-token"; setTokenReady(true); });
+  }, []);
+
+  // ── PDF file resolution ────────────────────────────────────────────────────
+  // This is the fix for "PDF not loading".
+  //
+  // Strategy:
+  //   • Org mode  → use the remote file_url from Supabase (passed via location.state).
+  //                  Never touch localStorage or local blobs.
+  //   • Personal  → prefer the File object from location.state (freshest), fall back
+  //                  to retrieveFile() (same session), then null.
+  //
+  // The blob URL is created once and stored in a ref so it survives re-renders
+  // without being recreated (which would invalidate the react-pdf cache).
+  const blobUrlRef = useRef(null);
+
+  // Create the blob URL synchronously during render the first time it's needed.
+  // We do this outside useMemo so there's no stale-closure risk with location.state.
+  const pdfFile = useMemo(() => {
+    if (!isPDF) return null;
+
+    if (isOrg) {
+      // Org: must have a remote URL. Personal blobs are never used here.
+      if (!fileUrl) return null;
+      return { url: fileUrl };
+    }
+
+    // Personal: File object → blob URL
+    if (!blobUrlRef.current) {
+      const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
+      if (fileObj) {
+        blobUrlRef.current = URL.createObjectURL(fileObj);
+      }
+    }
+    return blobUrlRef.current ? { url: blobUrlRef.current } : null;
+
+  // stateFile and fileUrl are stable (from location.state which never changes
+  // after mount), so this memo runs exactly once.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPDF, isOrg]);
+
+  // Revoke blob on unmount
+  useEffect(() => {
+    return () => {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
   }, []);
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -588,93 +587,48 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [sourcesHistory, setSourcesHistory] = useState(() =>
     loadFromStorage(sourcesKey(docName), [])
   );
-  const [chatHistory, setChatHistory]         = useState([]);
-  const [input, setInput]                     = useState("");
-  const [loading, setLoading]                 = useState(false);
-  const [highlights, setHighlights]           = useState([]);
+  const [chatHistory, setChatHistory]           = useState([]);
+  const [input, setInput]                       = useState("");
+  const [loading, setLoading]                   = useState(false);
+  const [highlights, setHighlights]             = useState([]);
   const [highlightedPages, setHighlightedPages] = useState({});
-  const [numPages, setNumPages]               = useState(null);
-  const [fetchedText, setFetchedText]         = useState("");
-  const [annotations, setAnnotations]         = useState([]);
+  const [numPages, setNumPages]                 = useState(null);
+  const [fetchedText, setFetchedText]           = useState("");
+  const [annotations, setAnnotations]           = useState([]);
   const [activeAnnotation, setActiveAnnotation] = useState(null);
-  const [newNote, setNewNote]                 = useState("");
-  const [selectedText, setSelectedText]       = useState("");
-  const [noteColor, setNoteColor]             = useState(ANNOTATION_COLORS[0]);
-  const [showNotePanel, setShowNotePanel]     = useState(false);
-  const [savingNote, setSavingNote]           = useState(false);
-  const [editingId, setEditingId]             = useState(null);
-  const [editNote, setEditNote]               = useState("");
-  const [deletingId, setDeletingId]           = useState(null);
-  const [sharingId, setSharingId]             = useState(null);
-  const [members, setMembers]                 = useState([]);
-  const [onlineSet, setOnlineSet]             = useState(new Set());
+  const [newNote, setNewNote]                   = useState("");
+  const [selectedText, setSelectedText]         = useState("");
+  const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
+  const [showNotePanel, setShowNotePanel]       = useState(false);
+  const [savingNote, setSavingNote]             = useState(false);
+  const [editingId, setEditingId]               = useState(null);
+  const [editNote, setEditNote]                 = useState("");
+  const [deletingId, setDeletingId]             = useState(null);
+  const [sharingId, setSharingId]               = useState(null);
+  const [members, setMembers]                   = useState([]);
+  const [onlineSet, setOnlineSet]               = useState(new Set());
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
-  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showInviteModal, setShowInviteModal]   = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
-  const [remoteCursors, setRemoteCursors]     = useState({});
-  const [onlineEmails, setOnlineEmails]       = useState([]);
+  const [remoteCursors, setRemoteCursors]       = useState({});
+  const [onlineEmails, setOnlineEmails]         = useState([]);
 
-  // ── Refs ───────────────────────────────────────────────────────────────────
   const pageRefs  = useRef({});
-  const pdfUrlRef = useRef(null);
   const bottomRef = useRef(null);
 
-  const userEmail = user?.email || "dev@securestream.local";
-
-  // Derived: latest source passages (for inline panel + highlights)
+  const userEmail     = user?.email || "dev@securestream.local";
   const sourcePassages = sourcesHistory.length > 0
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
 
-  // ── PDF blob URL ───────────────────────────────────────────────────────────
-  // FIX: org docs use `file_url` (remote Supabase URL), not the local blob.
-  //      Personal docs use the local File object from retrieveFile().
-  //      This prevents org members from accidentally loading another user's
-  //      local file and prevents personal blobs from leaking into the org view.
-  const pdfFile = useMemo(() => {
-    if (!isPDF) return null;
-
-    // Org workspace — always use the remote URL stored in Supabase
-    if (isOrg && fileUrl) {
-      return { url: fileUrl };
-    }
-
-    // Personal workspace — use the local blob (uploaded by this browser session)
-    if (!isOrg) {
-      if (pdfUrlRef.current) return { url: pdfUrlRef.current };
-      const fromState = location.state?.file;
-      const fileObj   = fromState instanceof File ? fromState : retrieveFile();
-      if (!fileObj) return null;
-      const url = URL.createObjectURL(fileObj);
-      pdfUrlRef.current = url;
-      return { url };
-    }
-
-    return null;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPDF, isOrg, fileUrl]);
-
-  // Revoke personal blob on unmount (org URLs are remote, no cleanup needed)
-  useEffect(() => {
-    return () => {
-      if (!isOrg && pdfUrlRef.current) {
-        URL.revokeObjectURL(pdfUrlRef.current);
-        pdfUrlRef.current = null;
-      }
-    };
-  }, [isOrg]);
-
   // ── Persist messages ───────────────────────────────────────────────────────
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
-    if (settled.length === 0) return;
-    saveToStorage(CHAT_KEY, settled);
+    if (settled.length) saveToStorage(CHAT_KEY, settled);
   }, [messages, CHAT_KEY]);
 
-  // ── Persist sources history ────────────────────────────────────────────────
   useEffect(() => {
-    if (sourcesHistory.length === 0) return;
-    saveToStorage(SOURCES_KEY, sourcesHistory);
+    if (sourcesHistory.length) saveToStorage(SOURCES_KEY, sourcesHistory);
   }, [sourcesHistory, SOURCES_KEY]);
 
   // ── Load document text ─────────────────────────────────────────────────────
@@ -695,12 +649,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
     const t = setTimeout(() => {
       getAnnotations(docName, tokenRef.current)
         .then((d) => setAnnotations(Array.isArray(d) ? d : []))
-        .catch(() => setAnnotations([]));
+        .catch(()  => setAnnotations([]));
     }, 400);
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
 
-  // ── Org: members + online presence ────────────────────────────────────────
+  // ── Org: members + presence ────────────────────────────────────────────────
   useEffect(() => {
     if (!isOrg) return;
     const fetchAll = async () => {
@@ -711,15 +665,15 @@ export default function DocViewerPage({ user, mode, orgName }) {
       } catch { /* silent */ }
     };
     fetchAll();
-    const interval = setInterval(fetchAll, 30000);
-    return () => clearInterval(interval);
+    const iv = setInterval(fetchAll, 30000);
+    return () => clearInterval(iv);
   }, [isOrg]);
 
   useEffect(() => {
     if (!isOrg) return;
     pingPresence();
-    const interval = setInterval(pingPresence, 60000);
-    return () => clearInterval(interval);
+    const iv = setInterval(pingPresence, 60000);
+    return () => clearInterval(iv);
   }, [isOrg]);
 
   // ── Auto-scroll chat ───────────────────────────────────────────────────────
@@ -728,26 +682,18 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, [messages, loading]);
 
   // ── Collaboration hook ─────────────────────────────────────────────────────
-  // FIX: only mount the WS hook after the token is ready, so we never connect
-  //      with a null token.
   const { sendCursor, sendAnnotationEvent } = useDocCollaboration({
     docName,
-    orgId:  isOrg && tokenReady ? orgName : null,   // null disables the hook
+    orgId:  isOrg && tokenReady ? orgName : null,
     email:  userEmail,
     token:  tokenRef.current,
     onCursor: useCallback((msg) => {
-      setRemoteCursors((prev) => ({
-        ...prev,
-        [msg.email]: { x: msg.x, y: msg.y, page: msg.page },
-      }));
+      setRemoteCursors((prev) => ({ ...prev, [msg.email]: { x: msg.x, y: msg.y, page: msg.page } }));
     }, []),
     onAnnotationEvent: useCallback((msg) => {
-      if (msg.action === "create")
-        setAnnotations((a) => [...a, msg.data]);
-      else if (msg.action === "update")
-        setAnnotations((a) => a.map((ann) => ann.id === msg.data.id ? msg.data : ann));
-      else if (msg.action === "delete")
-        setAnnotations((a) => a.filter((ann) => ann.id !== msg.data.id));
+      if      (msg.action === "create") setAnnotations((a) => [...a, msg.data]);
+      else if (msg.action === "update") setAnnotations((a) => a.map((ann) => ann.id === msg.data.id ? msg.data : ann));
+      else if (msg.action === "delete") setAnnotations((a) => a.filter((ann) => ann.id !== msg.data.id));
     }, []),
     onPresence: useCallback((msg) => {
       if (msg.event === "joined") setOnlineEmails((e) => [...new Set([...e, msg.email])]);
@@ -759,20 +705,13 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const handleMouseMove = useCallback((e) => {
     if (!isOrg) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    sendCursor(
-      Math.round(e.clientX - rect.left),
-      Math.round(e.clientY - rect.top),
-      1
-    );
+    sendCursor(Math.round(e.clientX - rect.left), Math.round(e.clientY - rect.top), 1);
   }, [isOrg, sendCursor]);
 
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
-    if (sel && sel.length > 3) {
-      setSelectedText(sel);
-      setShowNotePanel(true);
-    }
+    if (sel && sel.length > 3) { setSelectedText(sel); setShowNotePanel(true); }
   };
 
   const handleSaveNote = async () => {
@@ -780,42 +719,28 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setSavingNote(true);
     try {
       const ann = await createAnnotation({
-        doc_name:      docName,
-        selected_text: selectedText,
-        note:          newNote.trim(),
-        color:         noteColor,
-        is_shared:     false,
+        doc_name: docName, selected_text: selectedText,
+        note: newNote.trim(), color: noteColor, is_shared: false,
       }, tokenRef.current);
       setAnnotations((a) => [...a, ann]);
       sendAnnotationEvent("create", ann);
-      setNewNote("");
-      setSelectedText("");
-      setShowNotePanel(false);
-    } catch (err) {
-      console.error("Annotation error:", err);
-    } finally {
-      setSavingNote(false);
-    }
+      setNewNote(""); setSelectedText(""); setShowNotePanel(false);
+    } catch (err) { console.error("Annotation error:", err); }
+    finally { setSavingNote(false); }
   };
 
   const handleEditNote = async (ann) => {
     if (!editNote.trim()) return;
     try {
       const updated = await updateAnnotation(ann.id, {
-        doc_name:      ann.doc_name,
-        selected_text: ann.selected_text,
-        note:          editNote.trim(),
-        color:         ann.color,
+        doc_name: ann.doc_name, selected_text: ann.selected_text,
+        note: editNote.trim(), color: ann.color,
       }, tokenRef.current);
       setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, note: updated.note } : a));
-      if (activeAnnotation?.id === ann.id)
-        setActiveAnnotation((a) => ({ ...a, note: updated.note }));
+      if (activeAnnotation?.id === ann.id) setActiveAnnotation((a) => ({ ...a, note: updated.note }));
       sendAnnotationEvent("update", { ...ann, note: updated.note });
-      setEditingId(null);
-      setEditNote("");
-    } catch (err) {
-      console.error("Edit error:", err);
-    }
+      setEditingId(null); setEditNote("");
+    } catch (err) { console.error("Edit error:", err); }
   };
 
   const handleDeleteAnnotation = async (ann) => {
@@ -825,58 +750,35 @@ export default function DocViewerPage({ user, mode, orgName }) {
       setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
       if (activeAnnotation?.id === ann.id) setActiveAnnotation(null);
       sendAnnotationEvent("delete", { id: ann.id });
-    } catch (err) {
-      console.error("Delete error:", err);
-    } finally {
-      setDeletingId(null);
-    }
+    } catch (err) { console.error("Delete error:", err); }
+    finally { setDeletingId(null); }
   };
 
   const handleToggleShare = async (ann) => {
     setSharingId(ann.id);
     try {
       const updated = await toggleShareAnnotation(ann.id, !ann.is_shared, tokenRef.current);
-      setAnnotations((prev) =>
-        prev.map((a) => a.id === ann.id ? { ...a, is_shared: updated.is_shared } : a)
-      );
-      if (activeAnnotation?.id === ann.id)
-        setActiveAnnotation((a) => ({ ...a, is_shared: updated.is_shared }));
+      setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, is_shared: updated.is_shared } : a));
+      if (activeAnnotation?.id === ann.id) setActiveAnnotation((a) => ({ ...a, is_shared: updated.is_shared }));
       sendAnnotationEvent("update", { ...ann, is_shared: updated.is_shared });
-    } catch (err) {
-      console.error("Share error:", err);
-    } finally {
-      setSharingId(null);
-    }
+    } catch (err) { console.error("Share error:", err); }
+    finally { setSharingId(null); }
   };
 
   const handleRemoveMember = async (member) => {
-    try {
-      await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}`, {
-        method:  "DELETE",
-        headers: { Authorization: `Bearer ${tokenRef.current}` },
-      });
-      setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
-    } catch (err) {
-      console.error("Remove member error:", err);
-    }
+    await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}`, {
+      method: "DELETE", headers: { Authorization: `Bearer ${tokenRef.current}` },
+    });
+    setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
   };
 
   const handleChangeRole = async (member, newRole) => {
-    try {
-      await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}/role`, {
-        method:  "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization:  `Bearer ${tokenRef.current}`,
-        },
-        body: JSON.stringify({ role: newRole }),
-      });
-      setMembers((prev) =>
-        prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m)
-      );
-    } catch (err) {
-      console.error("Change role error:", err);
-    }
+    await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}/role`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenRef.current}` },
+      body: JSON.stringify({ role: newRole }),
+    });
+    setMembers((prev) => prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m));
   };
 
   // ── Send question ──────────────────────────────────────────────────────────
@@ -898,10 +800,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
     try {
       await askQuestionStream(
-        question,
-        docName,
-        newHistory,
-        // token callback
+        question, docName, newHistory,
         (token) => {
           setMessages((m) => {
             const updated = [...m];
@@ -910,65 +809,47 @@ export default function DocViewerPage({ user, mode, orgName }) {
             return updated;
           });
         },
-        // done callback
         (sources, passages) => {
-          setChatHistory((h) => [
-            ...h,
-            { role: "assistant", content: passages.length > 0 ? "..." : "Not found" },
-          ]);
+          setChatHistory((h) => [...h, { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }]);
           setMessages((m) => {
             const updated = [...m];
-            updated[updated.length - 1] = {
-              ...updated[updated.length - 1],
-              streaming: false,
-              sources,
-            };
+            updated[updated.length - 1] = { ...updated[updated.length - 1], streaming: false, sources };
             return updated;
           });
 
           const newGroup = {
-            id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            question,
-            passages:  passages || [],
-            timestamp: Date.now(),
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            question, passages: passages || [], timestamp: Date.now(),
           };
           setSourcesHistory((prev) => [...prev, newGroup]);
 
           const phrases = [...new Set(
-            (passages || [])
-              .sort((a, b) => b.similarity - a.similarity)
-              .map((p) => p.passage.slice(0, 120))
+            (passages || []).sort((a, b) => b.similarity - a.similarity).map((p) => p.passage.slice(0, 120))
           )];
           setHighlights(phrases);
 
           if (isPDF && passages?.length > 0) {
             const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
-            const pageHighlights = {};
+            const pageH  = {};
             sorted.forEach((p) => {
               const pg = p.page_number || 1;
-              if (!pageHighlights[pg]) pageHighlights[pg] = [];
-              pageHighlights[pg].push(p.passage.slice(0, 120));
+              if (!pageH[pg]) pageH[pg] = [];
+              pageH[pg].push(p.passage.slice(0, 120));
             });
-            setHighlightedPages(pageHighlights);
+            setHighlightedPages(pageH);
             setTimeout(() => {
-              const pageEl = pageRefs.current[sorted[0].page_number || 1];
-              if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+              const el = pageRefs.current[sorted[0].page_number || 1];
+              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
             }, 400);
           }
-
           setLoading(false);
         },
-        3,
-        docName
+        3, docName
       );
     } catch (err) {
       setMessages((m) => {
         const updated = [...m];
-        updated[updated.length - 1] = {
-          ...updated[updated.length - 1],
-          content:   `Error: ${err.message}`,
-          streaming: false,
-        };
+        updated[updated.length - 1] = { ...updated[updated.length - 1], content: `Error: ${err.message}`, streaming: false };
         return updated;
       });
       setLoading(false);
@@ -983,9 +864,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const parts             = highlightText(displayText, highlights);
   const onlineCount       = onlineSet.size;
   const totalSourceCount  = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
-
-  const accentBtn   = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
-  const accentFocus = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
+  const accentBtn         = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
+  const accentFocus       = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -993,20 +873,13 @@ export default function DocViewerPage({ user, mode, orgName }) {
       <Navbar user={user} />
 
       {showInviteModal && (
-        <InviteModal
-          orgName={orgName}
-          token={tokenRef.current}
-          onClose={() => setShowInviteModal(false)}
-        />
+        <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
       )}
       {showMembersModal && (
         <ManageMembersModal
-          members={members}
-          onlineSet={onlineSet}
-          userEmail={userEmail}
+          members={members} onlineSet={onlineSet} userEmail={userEmail}
           onClose={() => setShowMembersModal(false)}
-          onRemoveMember={handleRemoveMember}
-          onChangeRole={handleChangeRole}
+          onRemoveMember={handleRemoveMember} onChangeRole={handleChangeRole}
         />
       )}
 
@@ -1017,15 +890,11 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
           {/* Toolbar */}
           <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
-            isOrg
-              ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200"
-              : "bg-white border-gray-100"
+            isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
           }`}>
             <div className="flex items-center gap-3 min-w-0">
-              <button
-                onClick={() => navigate("/dashboard")}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
-              >
+              <button onClick={() => navigate("/dashboard")}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0">
                 ← Dashboard
               </button>
               <span className="text-gray-200">|</span>
@@ -1041,9 +910,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 </span>
               )}
               <span className="text-sm font-medium text-gray-700 truncate">{docName}</span>
-              <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
-                isPDF ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"
-              }`}>
+              <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${isPDF ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"}`}>
                 {isPDF ? "PDF" : "TXT"}
               </span>
             </div>
@@ -1061,8 +928,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     showSourcesPanel
                       ? "bg-amber-100 text-amber-800 border-amber-300"
                       : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
-                  }`}
-                >
+                  }`}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                     <polyline points="14 2 14 8 20 8"/>
@@ -1073,18 +939,13 @@ export default function DocViewerPage({ user, mode, orgName }) {
               <span className="text-xs text-gray-400">
                 {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
               </span>
-
               {isOrg && members.length > 0 && (
                 <div className="flex items-center gap-2 pl-2 border-l border-emerald-200">
                   <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
                   <div className="flex -space-x-1.5">
                     {members.slice(0, 5).map((m) => (
-                      <MemberAvatar
-                        key={m.user_sub}
-                        member={m}
-                        isOnline={onlineSet.has(m.user_sub)}
-                        isCurrent={m.email === userEmail}
-                      />
+                      <MemberAvatar key={m.user_sub} member={m}
+                        isOnline={onlineSet.has(m.user_sub)} isCurrent={m.email === userEmail}/>
                     ))}
                     {members.length > 5 && (
                       <div className="w-7 h-7 rounded-full bg-gray-100 border-2 border-white flex items-center justify-center text-xs font-medium text-gray-500">
@@ -1092,10 +953,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       </div>
                     )}
                   </div>
-                  <button
-                    onClick={() => setShowMembersModal(true)}
-                    className="text-xs text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100 px-2 py-1 rounded-lg transition-colors border border-emerald-200 flex items-center gap-1"
-                  >
+                  <button onClick={() => setShowMembersModal(true)}
+                    className="text-xs text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100 px-2 py-1 rounded-lg transition-colors border border-emerald-200 flex items-center gap-1">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                       <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
                       <circle cx="9" cy="7" r="4"/>
@@ -1104,10 +963,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     </svg>
                     Manage
                   </button>
-                  <button
-                    onClick={() => setShowInviteModal(true)}
-                    className={`text-xs text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}
-                  >
+                  <button onClick={() => setShowInviteModal(true)}
+                    className={`text-xs text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                       <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                     </svg>
@@ -1116,10 +973,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 </div>
               )}
               {isOrg && members.length === 0 && (
-                <button
-                  onClick={() => setShowInviteModal(true)}
-                  className={`text-xs text-white px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}
-                >
+                <button onClick={() => setShowInviteModal(true)}
+                  className={`text-xs text-white px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
@@ -1134,19 +989,17 @@ export default function DocViewerPage({ user, mode, orgName }) {
             <div className="px-5 py-2 border-b border-gray-100 bg-blue-50 flex items-center gap-2 flex-shrink-0 overflow-x-auto">
               <span className="text-xs text-blue-600 font-medium flex-shrink-0">Shared by team:</span>
               {sharedAnnotations.map((ann) => (
-                <button
-                  key={ann.id}
+                <button key={ann.id}
                   onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
                   style={{ borderColor: ann.color, backgroundColor: ann.color + "30" }}
-                  className="text-xs border rounded-lg px-2 py-1 text-gray-700 hover:opacity-80 transition-opacity flex-shrink-0"
-                >
+                  className="text-xs border rounded-lg px-2 py-1 text-gray-700 hover:opacity-80 transition-opacity flex-shrink-0">
                   {ann.user_email?.split("@")[0]} · "{ann.selected_text.slice(0, 20)}..."
                 </button>
               ))}
             </div>
           )}
 
-          {/* Document content */}
+          {/* Document area */}
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
             onMouseMove={handleMouseMove}
@@ -1155,36 +1008,28 @@ export default function DocViewerPage({ user, mode, orgName }) {
           >
             {/* Active annotation */}
             {activeAnnotation && (
-              <div
-                style={{ borderLeftColor: activeAnnotation.color }}
-                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3"
-              >
+              <div style={{ borderLeftColor: activeAnnotation.color }}
+                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3">
                 <div className="flex items-start justify-between">
                   <div className="flex-1 min-w-0">
                     <p className="text-xs text-gray-400 mb-0.5">
-                      {activeAnnotation.user_email === userEmail
-                        ? "Your note"
+                      {activeAnnotation.user_email === userEmail ? "Your note"
                         : `Note by ${activeAnnotation.user_email?.split("@")[0]}`}
-                      {activeAnnotation.is_shared && (
-                        <span className="ml-2 text-blue-500">· shared with org</span>
-                      )}
+                      {activeAnnotation.is_shared && <span className="ml-2 text-blue-500">· shared with org</span>}
                     </p>
                     <p className="text-xs text-gray-500 italic mb-1">
-                      "{activeAnnotation.selected_text?.slice(0, 80)}
-                      {activeAnnotation.selected_text?.length > 80 ? "..." : ""}"
+                      "{activeAnnotation.selected_text?.slice(0, 80)}{activeAnnotation.selected_text?.length > 80 ? "..." : ""}"
                     </p>
                     {editingId === activeAnnotation.id ? (
                       <div className="flex gap-2 mt-1">
-                        <input
-                          type="text"
-                          value={editNote}
-                          onChange={(e) => setEditNote(e.target.value)}
+                        <input type="text" value={editNote} onChange={(e) => setEditNote(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && handleEditNote(activeAnnotation)}
                           className="flex-1 border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-[#185FA5]"
-                          autoFocus
-                        />
-                        <button onClick={() => handleEditNote(activeAnnotation)} className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg">Save</button>
-                        <button onClick={() => { setEditingId(null); setEditNote(""); }} className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg">Cancel</button>
+                          autoFocus/>
+                        <button onClick={() => handleEditNote(activeAnnotation)}
+                          className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg">Save</button>
+                        <button onClick={() => { setEditingId(null); setEditNote(""); }}
+                          className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg">Cancel</button>
                       </div>
                     ) : (
                       <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
@@ -1192,37 +1037,30 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   </div>
                   <div className="flex items-center gap-1 ml-3 flex-shrink-0">
                     {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
-                      <button
-                        onClick={() => { setEditingId(activeAnnotation.id); setEditNote(activeAnnotation.note); }}
-                        className="text-xs text-gray-400 hover:text-gray-600 px-1.5 py-1 rounded hover:bg-gray-100"
-                      >Edit</button>
+                      <button onClick={() => { setEditingId(activeAnnotation.id); setEditNote(activeAnnotation.note); }}
+                        className="text-xs text-gray-400 hover:text-gray-600 px-1.5 py-1 rounded hover:bg-gray-100">Edit</button>
                     )}
                     {activeAnnotation.user_email === userEmail && (
-                      <button
-                        onClick={() => handleDeleteAnnotation(activeAnnotation)}
+                      <button onClick={() => handleDeleteAnnotation(activeAnnotation)}
                         disabled={deletingId === activeAnnotation.id}
-                        className="text-xs text-red-400 hover:text-red-600 px-1.5 py-1 rounded hover:bg-red-50"
-                      >
+                        className="text-xs text-red-400 hover:text-red-600 px-1.5 py-1 rounded hover:bg-red-50">
                         {deletingId === activeAnnotation.id ? "..." : "Delete"}
                       </button>
                     )}
-                    <button onClick={() => setActiveAnnotation(null)} className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded">✕</button>
+                    <button onClick={() => setActiveAnnotation(null)}
+                      className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded">✕</button>
                   </div>
                 </div>
                 {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
-                  <button
-                    onClick={() => handleToggleShare(activeAnnotation)}
+                  <button onClick={() => handleToggleShare(activeAnnotation)}
                     disabled={sharingId === activeAnnotation.id}
                     className={`mt-2 text-xs px-3 py-1 rounded-lg transition-colors ${
                       activeAnnotation.is_shared
                         ? "bg-blue-50 text-blue-600 hover:bg-blue-100"
                         : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                    }`}
-                  >
-                    {sharingId === activeAnnotation.id
-                      ? "Updating..."
-                      : activeAnnotation.is_shared
-                      ? "Shared · click to make private"
+                    }`}>
+                    {sharingId === activeAnnotation.id ? "Updating..."
+                      : activeAnnotation.is_shared ? "Shared · click to make private"
                       : "Private · click to share with org"}
                   </button>
                 )}
@@ -1236,16 +1074,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   <Document
                     file={pdfFile}
                     onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-                    onLoadError={(err) => console.error("PDF LOAD ERROR:", err)}
+                    onLoadError={(err) => console.error("PDF load error:", err)}
                   >
                     {Array.from({ length: numPages || 1 }, (_, i) => {
                       const pageNum = i + 1;
                       return (
-                        <div
-                          key={pageNum}
-                          ref={(el) => { pageRefs.current[pageNum] = el; }}
-                          className="relative mb-4"
-                        >
+                        <div key={pageNum} ref={(el) => { pageRefs.current[pageNum] = el; }} className="relative mb-4">
                           <Page
                             pageNumber={pageNum}
                             width={Math.min(600, window.innerWidth - 60)}
@@ -1254,12 +1088,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
                               if (!highlightedPages[pageNum]?.length) return;
                               const pageEl = pageRefs.current[pageNum];
                               if (!pageEl) return;
-                              const spans = pageEl.querySelectorAll(".react-pdf__Page__textContent span");
-                              spans.forEach((span) => {
+                              pageEl.querySelectorAll(".react-pdf__Page__textContent span").forEach((span) => {
                                 const matched = highlightedPages[pageNum].some((phrase) =>
-                                  span.textContent.toLowerCase().includes(
-                                    phrase.toLowerCase().slice(0, 40)
-                                  )
+                                  span.textContent.toLowerCase().includes(phrase.toLowerCase().slice(0, 40))
                                 );
                                 if (matched) {
                                   span.style.backgroundColor = "rgba(254, 240, 138, 0.7)";
@@ -1285,8 +1116,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     </p>
                     <p className="text-xs text-gray-400">
                       {isOrg
-                        ? "The file URL may have expired. Re-upload from the dashboard."
-                        : "Refresh the page or re-upload the document."}
+                        ? "The document may not have a stored file URL. Re-upload from the dashboard."
+                        : "Navigate back to the dashboard and re-open the document."}
                     </p>
                   </div>
                 )}
@@ -1300,12 +1131,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       <div className="flex flex-wrap gap-2 mb-6 pb-4 border-b border-gray-100">
                         <span className="text-xs text-gray-400 w-full">Your notes:</span>
                         {myAnnotations.map((ann) => (
-                          <button
-                            key={ann.id}
+                          <button key={ann.id}
                             onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
                             style={{ borderColor: ann.color }}
-                            className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5"
-                          >
+                            className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
                             <span style={{ backgroundColor: ann.color }} className="w-2 h-2 rounded-full inline-block"/>
                             "{ann.selected_text.slice(0, 25)}..."
                             {ann.is_shared && <span className="text-blue-400 ml-1">shared</span>}
@@ -1316,9 +1145,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
                       {parts.map((part, i) =>
                         part.highlight ? (
-                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5">
-                            {part.text}
-                          </mark>
+                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5">{part.text}</mark>
                         ) : (
                           <span key={i}>{part.text}</span>
                         )
@@ -1339,12 +1166,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
               </div>
             )}
 
-            {/* Remote cursors overlay */}
+            {/* Remote cursors */}
             {Object.entries(remoteCursors).map(([email, pos]) => (
-              <div
-                key={email}
-                style={{ position: "absolute", left: pos.x, top: pos.y, pointerEvents: "none", zIndex: 50 }}
-              >
+              <div key={email}
+                style={{ position: "absolute", left: pos.x, top: pos.y, pointerEvents: "none", zIndex: 50 }}>
                 <svg width="16" height="16" viewBox="0 0 16 16">
                   <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5"/>
                 </svg>
@@ -1365,64 +1190,40 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     "{selectedText.slice(0, 50)}{selectedText.length > 50 ? "..." : ""}"
                   </span>
                 </p>
-                <button
-                  onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
-                  className="text-xs text-gray-400 hover:text-gray-600"
-                >
-                  Cancel
-                </button>
+                <button onClick={() => { setShowNotePanel(false); setSelectedText(""); }}
+                  className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
               </div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-xs text-gray-400">Color:</span>
                 {ANNOTATION_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setNoteColor(c)}
-                    style={{ backgroundColor: c }}
-                    className={`w-5 h-5 rounded-full border-2 transition-transform ${
-                      noteColor === c ? "border-gray-600 scale-110" : "border-transparent"
-                    }`}
-                  />
+                  <button key={c} onClick={() => setNoteColor(c)} style={{ backgroundColor: c }}
+                    className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "border-gray-600 scale-110" : "border-transparent"}`}/>
                 ))}
               </div>
               <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newNote}
-                  onChange={(e) => setNewNote(e.target.value)}
+                <input type="text" value={newNote} onChange={(e) => setNewNote(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSaveNote()}
                   placeholder="Write your note..."
                   className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#185FA5] transition-colors"
-                  autoFocus
-                />
-                <button
-                  onClick={handleSaveNote}
-                  disabled={!newNote.trim() || savingNote}
-                  className={`px-4 py-2 text-xs rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}
-                >
+                  autoFocus/>
+                <button onClick={handleSaveNote} disabled={!newNote.trim() || savingNote}
+                  className={`px-4 py-2 text-xs rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}>
                   {savingNote ? "Saving..." : "Save note"}
                 </button>
               </div>
             </div>
           )}
         </div>
-        {/* END LEFT */}
 
         {/* ════ MIDDLE — Sources panel ════ */}
         {showSourcesPanel && (
-          <SourcesPanel
-            sourcesHistory={sourcesHistory}
-            isPDF={isPDF}
-            pageRefs={pageRefs}
-            onClose={() => setShowSourcesPanel(false)}
-          />
+          <SourcesPanel sourcesHistory={sourcesHistory} isPDF={isPDF}
+            pageRefs={pageRefs} onClose={() => setShowSourcesPanel(false)}/>
         )}
 
         {/* ════ RIGHT — AI Chat ════ */}
         <div className="w-96 flex flex-col bg-white flex-shrink-0 border-l border-gray-100">
-          <div className={`px-4 py-3 border-b flex-shrink-0 ${
-            isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"
-          }`}>
+          <div className={`px-4 py-3 border-b flex-shrink-0 ${isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"}`}>
             <div className="flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-2">
@@ -1431,14 +1232,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     onClick={() => {
                       localStorage.removeItem(CHAT_KEY);
                       localStorage.removeItem(SOURCES_KEY);
-                      setMessages([]);
-                      setSourcesHistory([]);
-                      setChatHistory([]);
-                      setHighlights([]);
-                      setHighlightedPages({});
+                      setMessages([]); setSourcesHistory([]); setChatHistory([]);
+                      setHighlights([]); setHighlightedPages({});
                     }}
-                    className="text-xs text-gray-400 hover:text-red-400 transition-colors"
-                  >
+                    className="text-xs text-gray-400 hover:text-red-400 transition-colors">
                     Clear
                   </button>
                 </div>
@@ -1454,13 +1251,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           </div>
 
-          {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
             {messages.length === 0 && (
               <div className="text-center mt-10">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 ${
-                  isOrg ? "bg-emerald-50" : "bg-blue-50"
-                }`}>
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 ${isOrg ? "bg-emerald-50" : "bg-blue-50"}`}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                     stroke={isOrg ? "#0F6E56" : "#185FA5"} strokeWidth="2" strokeLinecap="round">
                     <circle cx="11" cy="11" r="8"/>
@@ -1468,8 +1262,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   </svg>
                 </div>
                 <p className="text-xs text-gray-400 leading-relaxed px-4">
-                  {isOrg
-                    ? "Ask anything about this shared document."
+                  {isOrg ? "Ask anything about this shared document."
                     : "Ask anything. Matching passages are highlighted automatically."}
                 </p>
               </div>
@@ -1478,9 +1271,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             {messages.map((msg, i) => (
               <div key={i} className={`flex gap-2 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
                 {msg.role === "assistant" && (
-                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                    isOrg ? "bg-emerald-600" : "bg-[#185FA5]"
-                  }`}>
+                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isOrg ? "bg-emerald-600" : "bg-[#185FA5]"}`}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="white">
                       <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
                     </svg>
@@ -1489,37 +1280,27 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 <div
                   className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] ${
                     msg.role === "user"
-                      ? isOrg
-                        ? "bg-emerald-600 text-white rounded-tr-sm"
-                        : "bg-[#185FA5] text-white rounded-tr-sm"
+                      ? isOrg ? "bg-emerald-600 text-white rounded-tr-sm" : "bg-[#185FA5] text-white rounded-tr-sm"
                       : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
                   }`}
                   style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
                 >
                   {msg.content}
-                  {msg.streaming && (
-                    <span className="inline-block w-1 h-3 bg-gray-400 ml-0.5 animate-pulse rounded"/>
-                  )}
+                  {msg.streaming && <span className="inline-block w-1 h-3 bg-gray-400 ml-0.5 animate-pulse rounded"/>}
                 </div>
               </div>
             ))}
 
             {loading && !messages[messages.length - 1]?.streaming && (
               <div className="flex gap-2">
-                <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                  isOrg ? "bg-emerald-600" : "bg-[#185FA5]"
-                }`}>
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${isOrg ? "bg-emerald-600" : "bg-[#185FA5]"}`}>
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="white">
                     <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
                   </svg>
                 </div>
                 <div className="bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-3 py-2.5 flex gap-1">
                   {[0, 150, 300].map((d) => (
-                    <span
-                      key={d}
-                      className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"
-                      style={{ animationDelay: `${d}ms` }}
-                    />
+                    <span key={d} className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }}/>
                   ))}
                 </div>
               </div>
@@ -1527,76 +1308,56 @@ export default function DocViewerPage({ user, mode, orgName }) {
             <div ref={bottomRef}/>
           </div>
 
-          {/* Inline source passages */}
           {sourcePassages.length > 0 && (
             <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-gray-50">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs font-medium text-gray-500">
-                  Latest sources ({sourcePassages.length})
-                </p>
-                <button
-                  onClick={() => setShowSourcesPanel((v) => !v)}
+                <p className="text-xs font-medium text-gray-500">Latest sources ({sourcePassages.length})</p>
+                <button onClick={() => setShowSourcesPanel((v) => !v)}
                   className={`text-xs transition-colors flex items-center gap-1 ${
                     showSourcesPanel ? "text-amber-700 font-medium" : "text-gray-400 hover:text-amber-600"
-                  }`}
-                >
+                  }`}>
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                     <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
-                    <polyline points="15 3 21 3 21 9"/>
-                    <line x1="10" y1="14" x2="21" y2="3"/>
+                    <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
                   </svg>
                   {showSourcesPanel ? "Close history" : `All history (${sourcesHistory.length})`}
                 </button>
               </div>
               <div className="flex flex-col gap-2 max-h-36 overflow-y-auto">
                 {sourcePassages.map((p, i) => (
-                  <div
-                    key={i}
+                  <div key={i}
                     onClick={() => {
                       if (!isPDF) {
                         const marks = document.querySelectorAll("mark");
                         if (marks[i]) marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
                       } else {
-                        const pageEl = pageRefs.current[p.page_number || 1];
-                        if (pageEl) pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                        const el = pageRefs.current[p.page_number || 1];
+                        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
                       }
                     }}
-                    className="bg-white border border-yellow-200 rounded-lg px-3 py-2 cursor-pointer hover:border-yellow-400 transition-colors"
-                  >
+                    className="bg-white border border-yellow-200 rounded-lg px-3 py-2 cursor-pointer hover:border-yellow-400 transition-colors">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-gray-600 truncate">{p.doc_name}</span>
                       <span className="text-xs text-yellow-600 ml-2 flex-shrink-0">
                         {p.similarity > 0 ? `${Math.round(p.similarity * 100)}% match` : "keyword match"}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
-                      {p.passage.slice(0, 120)}...
-                    </p>
-                    {p.page_number && (
-                      <p className="text-xs text-gray-400 mt-1">Page {p.page_number}</p>
-                    )}
+                    <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{p.passage.slice(0, 120)}...</p>
+                    {p.page_number && <p className="text-xs text-gray-400 mt-1">Page {p.page_number}</p>}
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Input */}
           <div className="flex-shrink-0 px-4 py-3 border-t border-gray-100">
             <div className="flex gap-2">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
+              <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
                 placeholder={isOrg ? "Ask about this shared document..." : "Ask about this document..."}
-                className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors ${accentFocus}`}
-              />
-              <button
-                onClick={send}
-                disabled={!input.trim() || loading}
-                className={`px-3 rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}
-              >
+                className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors ${accentFocus}`}/>
+              <button onClick={send} disabled={!input.trim() || loading}
+                className={`px-3 rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                   <line x1="22" y1="2" x2="11" y2="13"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
@@ -1608,7 +1369,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </p>
           </div>
         </div>
-        {/* END RIGHT */}
 
       </main>
     </div>

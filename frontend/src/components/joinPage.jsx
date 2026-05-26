@@ -6,17 +6,19 @@ const BACKEND = import.meta.env.VITE_BACKEND_URL;
 export default function JoinPage({ user }) {
   const [params]   = useSearchParams();
   const navigate   = useNavigate();
-  const [status, setStatus] = useState("verifying"); // verifying | joining | error
-  const [errorMsg, setErrorMsg] = useState("");
-
   const orgName = params.get("org")   || "";
   const token   = params.get("token") || "";
   const role    = params.get("role")  || "member";
 
+  const hasValidInvite = Boolean(orgName && token);
+
+  const [status, setStatus] = useState(hasValidInvite ? "verifying" : "error"); // verifying | joining | error
+  const [errorMsg, setErrorMsg] = useState(
+    hasValidInvite ? "" : "Invalid invite link — missing org or token."
+  );
+
   useEffect(() => {
-    if (!orgName || !token) {
-      setStatus("error");
-      setErrorMsg("Invalid invite link — missing org or token.");
+    if (!hasValidInvite) {
       return;
     }
 
@@ -63,7 +65,7 @@ export default function JoinPage({ user }) {
 
     join();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hasValidInvite, navigate, orgName, role, token, user]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 font-sans">
