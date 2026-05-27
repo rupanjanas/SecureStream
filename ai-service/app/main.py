@@ -23,7 +23,6 @@ from app.ingest import ingest_document
 from app.models import IngestResponse, QueryRequest, QueryResponse
 from app.query import retrieve, build_context, RAG_PROMPT, ask_groq
 from app.ratelimit import check_rate_limit
-from app.ws import hub
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -120,74 +119,6 @@ async def health():
     db_ok = await db_test()
     return {"status": "ok", "db": "connected" if db_ok else "error"}
 
-
-# ── WebSocket — real-time collaboration ──────────────────────────────────────
-
-@app.websocket("/ws/doc/{doc_name}")
-async def doc_websocket(
-    websocket: WebSocket,
-    doc_name:  str,
-    token:     str = QQuery(...),
-    org_id:    str = QQuery(...),
-    email:     str = QQuery("anonymous"),
-):
-    # 1. Verify token BEFORE accepting the connection.
-    #    If invalid, close with 4403 (custom app-level code visible in browser devtools).
-    try:
-        claims = await verify_token_ws(token)
-    except HTTPException:
-        await websocket.close(code=4403, reason="Unauthorized")
-        return
-
-    # 2. Use identity from the verified token — never trust query params for identity.
-    verified_email = (
-        claims.get("email")
-        or claims.get("username")
-        or email
-    )
-    verified_org = claims.get("custom:org_id") or claims.get("sub")
-
-    # 3. Ensure the org_id in the query matches the token (prevents cross-org snooping).
-    if verified_org != org_id:
-        await websocket.close(code=4403, reason="org_id mismatch")
-        return
-
-    # 4. Accept and register in the room.
-    await hub.connect(websocket, verified_org, doc_name, verified_email)
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                continue   # ignore malformed frames
-
-            if msg.get("type") == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-                continue
-
-            # Stamp with verified identity before broadcasting
-            msg["email"] = verified_email
-            await hub.broadcast_event(websocket, msg)
-
-    except WebSocketDisconnect:
-        await hub.disconnect(websocket)
-    except Exception as e:
-        print(f"[WS] Unexpected error: {e}")
-        await hub.disconnect(websocket)
-
-
-# ── Presence — who is in a doc room right now ────────────────────────────────
-
-@app.get("/ws/doc/{doc_name}/members")
-async def doc_members(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-):
-    org_id  = claims.get("custom:org_id") or claims.get("sub")
-    members = hub.get_room_members(org_id, doc_name)
-    return {"doc_name": doc_name, "members": members}
 
 
 # ── Annotations ──────────────────────────────────────────────────────────────
@@ -429,7 +360,8 @@ async def query_stream(
 @app.get("/documents")
 async def list_documents(claims: dict = Depends(verify_token)):
     org_id = claims.get("custom:org_id") or claims.get("sub")
-
+    if not org_id:
+        raise HTTPException(status_code=403, detail="No org access")
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",

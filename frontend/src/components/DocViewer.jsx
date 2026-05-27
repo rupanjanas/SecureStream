@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
@@ -17,7 +17,6 @@ import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { askQuestionStream, getDocumentText } from "../api/aiService";
-import { useDocCollaboration } from "../hooks/useDocCollaboration";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AUTH_URL      = import.meta.env.VITE_BACKEND_URL;
@@ -610,8 +609,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
   const [showInviteModal, setShowInviteModal]   = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
-  const [remoteCursors, setRemoteCursors]       = useState({});
-  const [onlineEmails, setOnlineEmails]         = useState([]);
+
 
   const pageRefs  = useRef({});
   const bottomRef = useRef(null);
@@ -682,31 +680,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, [messages, loading]);
 
   // ── Collaboration hook ─────────────────────────────────────────────────────
-  const { sendCursor, sendAnnotationEvent } = useDocCollaboration({
-    docName,
-    orgId:  isOrg && tokenReady ? orgName : null,
-    email:  userEmail,
-    token:  tokenRef.current,
-    onCursor: useCallback((msg) => {
-      setRemoteCursors((prev) => ({ ...prev, [msg.email]: { x: msg.x, y: msg.y, page: msg.page } }));
-    }, []),
-    onAnnotationEvent: useCallback((msg) => {
-      if      (msg.action === "create") setAnnotations((a) => [...a, msg.data]);
-      else if (msg.action === "update") setAnnotations((a) => a.map((ann) => ann.id === msg.data.id ? msg.data : ann));
-      else if (msg.action === "delete") setAnnotations((a) => a.filter((ann) => ann.id !== msg.data.id));
-    }, []),
-    onPresence: useCallback((msg) => {
-      if (msg.event === "joined") setOnlineEmails((e) => [...new Set([...e, msg.email])]);
-      if (msg.event === "left")   setOnlineEmails((e) => e.filter((x) => x !== msg.email));
-    }, []),
-  });
+  const sendAnnotationEvent = () => {};
 
   // ── Handlers ───────────────────────────────────────────────────────────────
-  const handleMouseMove = useCallback((e) => {
-    if (!isOrg) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    sendCursor(Math.round(e.clientX - rect.left), Math.round(e.clientY - rect.top), 1);
-  }, [isOrg, sendCursor]);
 
   const handleTextSelect = () => {
     if (isPDF) return;
@@ -1002,7 +978,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
           {/* Document area */}
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
-            onMouseMove={handleMouseMove}
             className="flex-1 overflow-y-auto"
             style={{ position: "relative" }}
           >
@@ -1165,19 +1140,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 )}
               </div>
             )}
-
-            {/* Remote cursors */}
-            {Object.entries(remoteCursors).map(([email, pos]) => (
-              <div key={email}
-                style={{ position: "absolute", left: pos.x, top: pos.y, pointerEvents: "none", zIndex: 50 }}>
-                <svg width="16" height="16" viewBox="0 0 16 16">
-                  <path d="M0 0L0 12L3.5 8.5L6 13L8 12L5.5 7L10 7Z" fill="#185FA5"/>
-                </svg>
-                <span className="text-xs bg-[#185FA5] text-white px-1 rounded ml-1 whitespace-nowrap">
-                  {email.split("@")[0]}
-                </span>
-              </div>
-            ))}
           </div>
 
           {/* Note panel */}

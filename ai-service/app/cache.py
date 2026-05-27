@@ -16,8 +16,7 @@ import json
 from typing import Optional
 
 import numpy as np
-import redis.asyncio as redis
-
+import redis.asyncio as redis 
 from app.config import settings
 
 # ──────────────────────────────────────────────

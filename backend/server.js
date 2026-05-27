@@ -193,28 +193,44 @@ app.get('/org/join/:token', checkAuth, async (req, res) => {
   const { token } = req.params;
   const user = req.session.userInfo;
 
+  if (!user) {
+    return res.redirect(`${process.env.FRONTEND_URL}/login?redirect=/org/join/${token}`);
+  }
+
   const { data: invite, error } = await supabaseAdmin
     .from('invite_tokens')
     .select('*, orgs(*)')
     .eq('token', token)
     .single();
 
-  if (error || !invite) return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_invite`);
-  if (invite.expires_at && new Date(invite.expires_at) < new Date())
+  if (error || !invite) {
+    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_invite`);
+  }
+  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
     return res.redirect(`${process.env.FRONTEND_URL}?error=expired_invite`);
+  }
 
-  // Add member if not already in org
+  // Add member
   await supabaseAdmin.from('org_members').upsert({
-    org_id: invite.org_id,
+    org_id:   invite.org_id,
     user_sub: user.sub,
-    email: user.email,
-    role: 'member'
+    email:    user.email,
+    role:     'member'
   }, { onConflict: 'org_id,user_sub' });
 
-  // Store org in session
-  req.session.orgId = invite.org_id;
+  // Set session to this org immediately
+  req.session.orgId   = invite.org_id;
   req.session.orgName = invite.orgs.name;
+  req.session.mode    = 'org';
+
+  // Add to memberships in session
+  req.session.memberships = [
+    ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
+    { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } }
+  ];
+
   req.session.save(() => {
+    // Redirect directly to dashboard in org mode
     res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
   });
 });
