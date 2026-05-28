@@ -231,11 +231,13 @@ MAX_FILE_MB  = 10
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
-    file:     UploadFile = File(...),
-    claims:   dict       = Depends(verify_token),
-    x_domain: str        = Header(default="general"),
+    file:      UploadFile = File(...),
+    claims:    dict       = Depends(verify_token),
+    x_domain:  str        = Header(default="general"),
+    x_org_id:  str        = Header(default=""),   # ← ADD: frontend sends this
 ):
-    org_id = claims.get("sub")
+    # Use x_org_id header if provided (org mode), else fall back to sub (personal)
+    org_id = x_org_id.strip() or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
@@ -248,7 +250,6 @@ async def ingest(
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB} MB limit")
 
     safe_filename = os.path.basename(file.filename or "upload").replace("..", "")
-
     return await ingest_document(file_bytes, safe_filename, org_id, domain=x_domain)
 
 
@@ -269,10 +270,11 @@ async def _save_query_log(org_id, question, answer, sources):
 
 @app.post("/query/stream")
 async def query_stream(
-    body:   QueryRequest,
-    claims: dict = Depends(verify_token),
+    body:     QueryRequest,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
 ):
-    org_id = claims.get("custom:org_id") or claims.get("sub")
+    org_id = x_org_id.strip() or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
 
@@ -358,8 +360,11 @@ async def query_stream(
 # ── Documents list ───────────────────────────────────────────────────────────
 
 @app.get("/documents")
-async def list_documents(claims: dict = Depends(verify_token)):
-    org_id = claims.get("custom:org_id") or claims.get("sub")
+async def list_documents(
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = x_org_id.strip() or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=403, detail="No org access")
     async with httpx.AsyncClient() as client:

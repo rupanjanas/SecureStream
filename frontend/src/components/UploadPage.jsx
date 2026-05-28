@@ -1,17 +1,17 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { uploadDocument,getSession } from "../api/aiService";
-import { storeFile } from "../utils/filestore";
+import { uploadDocument, getSession } from "../api/aiService";
+import { storeFile } from "../utils/fileStore";
 
-export default function UploadPage({ user, orgId, mode }) {
-  const [dragging, setDragging] = useState(false);
-  const [file, setFile]         = useState(null);
-  const [status, setStatus]     = useState(null);
-  const [result, setResult]     = useState(null);
-  const [error, setError]       = useState(null);
-  const inputRef                = useRef(null);
-  const navigate                = useNavigate();
+export default function UploadPage({ user, mode, orgId }) {
+  const [dragging, setDragging]   = useState(false);
+  const [file, setFile]           = useState(null);
+  const [status, setStatus]       = useState(null);
+  const [result, setResult]       = useState(null);
+  const [error, setError]         = useState(null);
+  const inputRef                  = useRef(null);
+  const navigate                  = useNavigate();
 
   const handleFile = (f) => {
     if (!f) return;
@@ -31,20 +31,15 @@ export default function UploadPage({ user, orgId, mode }) {
     handleFile(e.dataTransfer.files[0]);
   };
 
- const handleUpload = async () => {
+  const handleUpload = async () => {
     if (!file) return;
     setStatus("uploading");
     setError(null);
-    try {
-      const session = await getSession();
-      if (!session?.access_token) {
-        setError("Not authenticated.");
-        setStatus("error");
-        return;
-      }
 
+    try {
       const isPDF = file.type === "application/pdf";
       let docText = "";
+
       if (!isPDF) {
         docText = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -54,18 +49,33 @@ export default function UploadPage({ user, orgId, mode }) {
         });
       }
 
-      const data = await uploadDocument(file); // ← real token
+      // Get token
+      const session = await getSession();
+      const token   = session?.access_token || "dev-token";
+
+      // Upload — pass orgId so ingest scopes correctly
+      const data = await uploadDocument(file, token, mode === "org" ? orgId : null);
       setResult(data);
       setStatus("done");
 
-      setTimeout(async () => {
-        if (isPDF) await storeFile(file);
+      setTimeout(() => {
+        if (isPDF) {
+          // For personal mode: store file object for blob URL in viewer
+          // For org mode:      the viewer will use data.file_url from storage
+          if (mode !== "org") storeFile(file);
+        }
+
         navigate("/doc-viewer", {
-          state: { docName: file.name, docText, fromDashboard: false }
+          state: {
+            docName:  file.name,
+            docText:  isPDF ? "" : docText,
+            file_url: data.file_url || null,   // ← remote URL from Supabase Storage
+            fromDashboard: false,
+          }
         });
       }, 1200);
     } catch (err) {
-      setError(err.message || "Upload failed.");
+      setError(err.message || "Upload failed. Is the AI service running?");
       setStatus("error");
     }
   };
@@ -82,7 +92,9 @@ export default function UploadPage({ user, orgId, mode }) {
           </button>
           <h1 className="text-2xl font-bold text-gray-900">Upload document</h1>
           <p className="text-sm text-gray-400 mt-1">
-            Files are chunked, embedded with nomic-embed-text, and stored in your org's isolated namespace.
+            {mode === "org"
+              ? "Document will be shared with your entire organisation."
+              : "Document will be stored in your private workspace."}
           </p>
         </div>
 
@@ -135,32 +147,22 @@ export default function UploadPage({ user, orgId, mode }) {
           )}
         </div>
 
-        {/* Error */}
         {error && (
           <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 text-sm text-red-600 mb-4">
             {error}
           </div>
         )}
 
-        {/* Success */}
         {status === "done" && result && (
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-4 mb-4">
-            <p className="text-sm font-semibold text-emerald-700 mb-1">
-              Ingested successfully
-            </p>
-            <p className="text-xs text-emerald-600 mb-3">
+            <p className="text-sm font-semibold text-emerald-700 mb-1">Ingested successfully</p>
+            <p className="text-xs text-emerald-600">
               {result.chunks_stored} chunks stored · "{result.doc_name}"
+              {mode === "org" && " · shared with org"}
             </p>
-            <button
-              onClick={() => navigate("/chat")}
-              className="px-4 py-1.5 text-xs rounded-lg bg-[#185FA5] text-white hover:bg-[#0C447C] transition-colors"
-            >
-              Ask questions about this document →
-            </button>
           </div>
         )}
 
-        {/* Upload button */}
         <button
           onClick={handleUpload}
           disabled={!file || status === "uploading"}
@@ -173,23 +175,17 @@ export default function UploadPage({ user, orgId, mode }) {
                 <circle cx="12" cy="12" r="10" strokeOpacity=".25"/>
                 <path d="M12 2a10 10 0 0110 10"/>
               </svg>
-              Embedding chunks — this may take a minute...
+              Uploading and embedding...
             </>
           ) : "Upload and embed"}
         </button>
 
         <p className="text-xs text-gray-400 text-center mt-3">
-          Documents are org-isolated. Other organizations cannot access your files.
+          {mode === "org"
+            ? "Shared with your organisation. Members can view and query this document."
+            : "Private to your account. Only you can access this document."}
         </p>
       </main>
-
-      <footer className="border-t border-gray-100 px-8 py-4 flex justify-between text-xs text-gray-400">
-        <span>© 2026 SecureStream</span>
-        <div className="flex gap-4">
-          <a href="/privacy" className="hover:text-gray-600">Privacy</a>
-          <a href="/terms" className="hover:text-gray-600">Terms</a>
-        </div>
-      </footer>
     </div>
   );
 }

@@ -547,27 +547,28 @@ export default function DocViewerPage({ user, mode, orgName }) {
   // Create the blob URL synchronously during render the first time it's needed.
   // We do this outside useMemo so there's no stale-closure risk with location.state.
   const pdfFile = useMemo(() => {
-    if (!isPDF) return null;
+  if (!isPDF) return null;
 
-    if (isOrg) {
-      // Org: must have a remote URL. Personal blobs are never used here.
-      if (!fileUrl) return null;
-      return { url: fileUrl };
+  // Priority 1: remote URL from Supabase Storage (works for both org and personal)
+  // fileUrl comes from location.state.file_url set by UploadPage or Dashboard
+  if (fileUrl) {
+    console.log("[PDF] Using remote storage URL:", fileUrl);
+    return { url: fileUrl };
+  }
+
+  // Priority 2: blob from local File object (personal, same session as upload)
+  if (!blobUrlRef.current) {
+    const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
+    if (fileObj) {
+      blobUrlRef.current = URL.createObjectURL(fileObj);
+      console.log("[PDF] Using blob URL from file object");
     }
+  }
 
-    // Personal: File object → blob URL
-    if (!blobUrlRef.current) {
-      const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
-      if (fileObj) {
-        blobUrlRef.current = URL.createObjectURL(fileObj);
-      }
-    }
-    return blobUrlRef.current ? { url: blobUrlRef.current } : null;
+  return blobUrlRef.current ? { url: blobUrlRef.current } : null;
 
-  // stateFile and fileUrl are stable (from location.state which never changes
-  // after mount), so this memo runs exactly once.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPDF, isOrg]);
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [isPDF, fileUrl]);
 
   // Revoke blob on unmount
   useEffect(() => {
@@ -759,78 +760,99 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   // ── Send question ──────────────────────────────────────────────────────────
   const send = async () => {
-    const question = input.trim();
-    if (!question || loading) return;
+  const question = input.trim();
+  if (!question || loading) return;
 
-    const newHistory = [...chatHistory, { role: "user", content: question }];
-    setChatHistory(newHistory);
-    setMessages((m) => [
-      ...m.filter((msg) => !msg.streaming),
-      { role: "user", content: question },
-      { role: "assistant", content: "", streaming: true },
-    ]);
-    setInput("");
-    setLoading(true);
-    setHighlights([]);
-    setHighlightedPages({});
+  const newHistory = [...chatHistory, { role: "user", content: question }];
+  setChatHistory(newHistory);
+  setMessages((m) => [
+    ...m.filter((msg) => !msg.streaming),
+    { role: "user", content: question },
+    { role: "assistant", content: "", streaming: true },
+  ]);
+  setInput("");
+  setLoading(true);
+  setHighlights([]);
+  setHighlightedPages({});
 
-    try {
-      await askQuestionStream(
-        question, docName, newHistory,
-        (token) => {
-          setMessages((m) => {
-            const updated = [...m];
-            const last    = updated[updated.length - 1];
-            updated[updated.length - 1] = { ...last, content: last.content + token };
-            return updated;
-          });
-        },
-        (sources, passages) => {
-          setChatHistory((h) => [...h, { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }]);
-          setMessages((m) => {
-            const updated = [...m];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], streaming: false, sources };
-            return updated;
-          });
-
-          const newGroup = {
-            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            question, passages: passages || [], timestamp: Date.now(),
+  try {
+    await askQuestionStream(
+      question,
+      docName,
+      newHistory,
+      // onToken
+      (token) => {
+        setMessages((m) => {
+          const updated = [...m];
+          const last    = updated[updated.length - 1];
+          updated[updated.length - 1] = { ...last, content: last.content + token };
+          return updated;
+        });
+      },
+      // onDone
+      (sources, passages) => {
+        setChatHistory((h) => [
+          ...h,
+          { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }
+        ]);
+        setMessages((m) => {
+          const updated = [...m];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            streaming: false,
+            sources,
           };
-          setSourcesHistory((prev) => [...prev, newGroup]);
+          return updated;
+        });
 
-          const phrases = [...new Set(
-            (passages || []).sort((a, b) => b.similarity - a.similarity).map((p) => p.passage.slice(0, 120))
-          )];
-          setHighlights(phrases);
+        const newGroup = {
+          id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          question,
+          passages:  passages || [],
+          timestamp: Date.now(),
+        };
+        setSourcesHistory((prev) => [...prev, newGroup]);
 
-          if (isPDF && passages?.length > 0) {
-            const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
-            const pageH  = {};
-            sorted.forEach((p) => {
-              const pg = p.page_number || 1;
-              if (!pageH[pg]) pageH[pg] = [];
-              pageH[pg].push(p.passage.slice(0, 120));
-            });
-            setHighlightedPages(pageH);
-            setTimeout(() => {
-              const el = pageRefs.current[sorted[0].page_number || 1];
-              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 400);
-          }
-          setLoading(false);
-        },
-        3, docName
-      );
-    } catch (err) {
-      setMessages((m) => {
-        const updated = [...m];
-        updated[updated.length - 1] = { ...updated[updated.length - 1], content: `Error: ${err.message}`, streaming: false };
-        return updated;
-      });
-      setLoading(false);
-    }
-  };
+        const phrases = [...new Set(
+          (passages || [])
+            .sort((a, b) => b.similarity - a.similarity)
+            .map((p) => p.passage.slice(0, 120))
+        )];
+        setHighlights(phrases);
+
+        if (isPDF && passages?.length > 0) {
+          const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
+          const pageH  = {};
+          sorted.forEach((p) => {
+            const pg = p.page_number || 1;
+            if (!pageH[pg]) pageH[pg] = [];
+            pageH[pg].push(p.passage.slice(0, 120));
+          });
+          setHighlightedPages(pageH);
+          setTimeout(() => {
+            const el = pageRefs.current[sorted[0].page_number || 1];
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }, 400);
+        }
+
+        setLoading(false);
+      },
+      3,    // topK
+      null  // orgId — add orgId prop to DocViewerPage and pass mode === "org" ? orgId : null
+    );
+  } catch (err) {
+    setMessages((m) => {
+      const updated = [...m];
+      updated[updated.length - 1] = {
+        ...updated[updated.length - 1],
+        content:   `Error: ${err.message}`,
+        streaming: false,
+      };
+      return updated;
+    });
+    setLoading(false);
+  }
+};
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];

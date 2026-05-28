@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import LandingPage    from "./components/landingPage";
 import OnboardingPage from "./components/Onboarding";
@@ -18,6 +19,20 @@ function ProtectedRoute({ user, children }) {
   if (!user) return null;
   return children;
 }
+function JoinOrgRedirect() {
+  const { token } = useParams();
+
+  useEffect(() => {
+    // Redirect to backend which handles the join logic
+    window.location.href = `${import.meta.env.VITE_BACKEND_URL}/org/join/${token}`;
+  }, [token]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <p className="text-sm text-gray-500">Joining workspace...</p>
+    </div>
+  );
+}
 
 export default function App() {
   const [user, setUser]       = useState(null);
@@ -26,20 +41,39 @@ export default function App() {
   const [mode, setMode]       = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetch(`${AUTH_URL}/`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.isAuthenticated) {
-          setUser(data.user);
-          setOrgId(data.orgId   || null);
-          setOrgName(data.orgName || null);
-          setMode(data.mode     || null);
-        }
-      })
-      .catch((err) => console.error("Fetch error:", err))
-      .finally(() => setLoading(false));
-  }, []);
+  // In App.jsx — replace your session fetch with this:
+useEffect(() => {
+  const controller = new AbortController();
+  const timeout    = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
+  fetch(`${import.meta.env.VITE_BACKEND_URL}/`, {
+    credentials: "include",
+    signal:      controller.signal,
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      clearTimeout(timeout);
+      if (data.isAuthenticated) {
+        setUser(data.user);
+        setMode(data.mode || "personal");
+        setOrgId(data.orgId || null);
+        setOrgName(data.orgName || null);
+      }
+      setLoading(false);
+    })
+    .catch((err) => {
+      clearTimeout(timeout);
+      if (err.name !== "AbortError") {
+        console.error("Session fetch failed:", err);
+      }
+      setLoading(false); // ← never leave user stuck on loading
+    });
+
+  return () => {
+    clearTimeout(timeout);
+    controller.abort();
+  };
+}, []);
 
   if (loading) {
     return (
@@ -61,6 +95,7 @@ export default function App() {
         <Route path="/onboarding"       element={<OnboardingPage />} />
         <Route path="/org-setup"        element={<OrgSetupPage />} />
         <Route path="/join"             element={<JoinPage user={user} />} />
+        <Route path="/org/join/:token" element={<JoinOrgRedirect />} />
         <Route path="/workspace-select" element={
   <ProtectedRoute user={user}>
     <WorkspaceSelectPage
@@ -77,7 +112,7 @@ export default function App() {
         }/>
         <Route path="/upload" element={
           <ProtectedRoute user={user}>
-            <UploadPage user={user} orgId={orgId} mode={mode} />
+          <UploadPage user={user} mode={mode} orgId={orgId} />
           </ProtectedRoute>
         }/>
         <Route path="/chat" element={

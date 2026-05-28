@@ -278,24 +278,49 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             json={
                 "input": texts,
                 "model": "jina-embeddings-v3",
-                "task":  "text-matching",  # ← symmetric task, works for both
+                "task":  "retrieval.passage",
             },
         )
         r.raise_for_status()
         return [item["embedding"] for item in r.json()["data"]]
 
 
-# ── Storage ───────────────────────────────────────────────────────────────────
+# ── Supabase Storage upload ───────────────────────────────────────────────────
 
-async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> str:
+async def upload_to_storage(
+    file_bytes: bytes,
+    filename:   str,
+    org_id:     str,
+) -> str | None:
+    """
+    Upload the original file to Supabase Storage.
+    Returns the public URL, or None if upload fails.
+    The URL is stored in each chunk row so list_documents can return it
+    and the DocViewer can load the PDF directly without needing a local File object.
+    """
     path = f"{org_id}/{filename}"
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{BASE}/storage/v1/object/documents/{path}",
-            headers={**HEADERS, "Content-Type": "application/octet-stream"},
-            content=file_bytes,
-        )
-    return f"{BASE}/storage/v1/object/public/documents/{path}"
+    storage_headers = {
+        "apikey":        settings.supabase_service_key,
+        "Authorization": f"Bearer {settings.supabase_service_key}",
+        "Content-Type":  "application/octet-stream",
+        "x-upsert":      "true",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{BASE}/storage/v1/object/documents/{path}",
+                headers=storage_headers,
+                content=file_bytes,
+            )
+            if r.status_code not in (200, 201):
+                print(f"[STORAGE] Upload failed {r.status_code}: {r.text}")
+                return None
+        url = f"{BASE}/storage/v1/object/public/documents/{path}"
+        print(f"[STORAGE] Uploaded → {url}")
+        return url
+    except Exception as e:
+        print(f"[STORAGE] Exception: {e}")
+        return None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -304,13 +329,17 @@ def fingerprint(text: str) -> str:
     n = re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', text.lower().strip()))
     return hashlib.md5(n.encode()).hexdigest()
 
+
 def clean_document_text(text: str) -> str:
-    text = re.sub(r'-\s*\n\s*', '', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)   # fix PDF word-boundary loss
+    text = re.sub(r'-\s*\n\s*', '', text)               # fix hyphenated line breaks
+    text = re.sub(r'\s+', ' ', text)                     # collapse whitespace
     text = re.sub(r'([.!?,:;])([A-Za-z])', r'\1 \2', text)
     return text.strip()
 
+
 _JUNK = re.compile(r'(https?://|www\.|doi\.org)', re.IGNORECASE)
+
 
 def is_junk(text: str) -> bool:
     sentences = [s.strip() for s in text.split('.') if s.strip()]
@@ -322,12 +351,9 @@ def is_junk(text: str) -> bool:
 # ── Chunking ──────────────────────────────────────────────────────────────────
 
 def process_and_chunk_document(
-    doc_pages: List[Dict[str, Any]], filename: str
+    doc_pages: List[Dict[str, Any]],
+    filename:  str,
 ) -> List[Dict[str, Any]]:
-    """
-    Chunks document pages using LlamaIndex SentenceSplitter.
-    Tracks page numbers by mapping chunk positions back to page offsets.
-    """
     segments     = []
     page_offsets = []
     offset       = 0
@@ -352,7 +378,7 @@ def process_and_chunk_document(
         nodes       = _splitter.get_nodes_from_documents([Document(text=full_text)])
         chunks_text = [n.text for n in nodes if n.text.strip()]
     except Exception as e:
-        print(f"[CHUNK] Splitter failed: {e} — falling back to split_text")
+        print(f"[CHUNK] Splitter failed: {e} — falling back")
         chunks_text = [t for t in _splitter.split_text(full_text) if t.strip()]
 
     processed = []
@@ -386,7 +412,7 @@ def process_and_chunk_document(
     return processed
 
 
-# ── PDF extraction ────────────────────────────────────────────────────────────
+# ── PDF / TXT extraction ──────────────────────────────────────────────────────
 
 def extract_pdf_pages(path: str) -> List[Dict[str, Any]]:
     doc   = fitz.open(path)
@@ -409,7 +435,7 @@ def extract_txt_pages(raw: str) -> List[Dict[str, Any]]:
     return [{"page_num": 1, "text": raw}]
 
 
-# ── Main ingest function ──────────────────────────────────────────────────────
+# ── Main ingest ───────────────────────────────────────────────────────────────
 
 async def ingest_document(
     file_bytes: bytes,
@@ -419,73 +445,79 @@ async def ingest_document(
 ) -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
 
+    # 1. Upload original file to Supabase Storage so viewer can load it by URL
+    file_url = await upload_to_storage(file_bytes, filename, org_id)
+
+    # 2. Extract pages
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
 
     try:
-        # ── Extract pages ──
         if suffix == ".pdf":
             pages = extract_pdf_pages(tmp_path)
         else:
             raw   = file_bytes.decode("utf-8", errors="ignore")
             pages = extract_txt_pages(raw)
-
-        # ── Chunk ──
-        chunks = process_and_chunk_document(pages, filename)
-
-        if not chunks:
-            return {
-                "message":       "No content extracted",
-                "chunks_stored": 0,
-                "doc_name":      filename,
-            }
-
-        # ── Deduplicate ──
-        seen, unique = set(), []
-        for c in chunks:
-            fp = fingerprint(c["text"])
-            if fp not in seen:
-                seen.add(fp)
-                unique.append(c)
-
-        print(f"[{filename}] {len(chunks)} chunks → {len(unique)} after dedup")
-        for c in unique[:5]:
-            print(f"  page={c['page']} text={c['text'][:80]!r}")
-
-        # ── Embed in batches of 32 ──
-        texts       = [c["text"] for c in unique]
-        all_vectors: list[list[float]] = []
-        for i in range(0, len(texts), 32):
-            vecs = await embed_texts(texts[i:i + 32])
-            all_vectors.extend(vecs)
-
-        # ── Store in Supabase ──
-        rows = [
-            {
-                "org_id":     org_id,
-                "doc_name":   filename,
-                "chunk_text": unique[i]["text"],
-                "embedding":  all_vectors[i],
-                "metadata": {
-                    "domain":      domain,
-                    "chunk_index": unique[i]["chunk_index"],
-                    "page_number": unique[i]["page"],
-                    "doc_name":    filename,
-                    "char_count":  len(unique[i]["text"]),
-                    "section":     f"Page {unique[i]['page']}",
-                },
-            }
-            for i in range(len(unique))
-        ]
-
-        await db_insert("documents", rows)
-
-        return {
-            "message":       "Ingested successfully",
-            "chunks_stored": len(rows),
-            "doc_name":      filename,
-        }
-
     finally:
         os.unlink(tmp_path)
+
+    # 3. Chunk
+    chunks = process_and_chunk_document(pages, filename)
+
+    if not chunks:
+        return {
+            "message":       "No content extracted",
+            "chunks_stored": 0,
+            "doc_name":      filename,
+            "file_url":      file_url,
+        }
+
+    # 4. Deduplicate
+    seen, unique = set(), []
+    for c in chunks:
+        fp = fingerprint(c["text"])
+        if fp not in seen:
+            seen.add(fp)
+            unique.append(c)
+
+    print(f"[{filename}] {len(chunks)} chunks → {len(unique)} after dedup")
+    for c in unique[:3]:
+        print(f"  page={c['page']} text={c['text'][:80]!r}")
+
+    # 5. Embed in batches of 32
+    texts       = [c["text"] for c in unique]
+    all_vectors: list[list[float]] = []
+    for i in range(0, len(texts), 32):
+        vecs = await embed_texts(texts[i:i + 32])
+        all_vectors.extend(vecs)
+
+    # 6. Build rows — file_url stored at row level so list_documents picks it up
+    rows = [
+        {
+            "org_id":     org_id,
+            "doc_name":   filename,
+            "chunk_text": unique[i]["text"],
+            "embedding":  all_vectors[i],
+            "file_url":   file_url,        # ← top-level column
+            "metadata": {
+                "domain":      domain,
+                "chunk_index": unique[i]["chunk_index"],
+                "page_number": unique[i]["page"],
+                "doc_name":    filename,
+                "char_count":  len(unique[i]["text"]),
+                "section":     f"Page {unique[i]['page']}",
+                "file_url":    file_url,   # ← also in metadata as fallback
+            },
+        }
+        for i in range(len(unique))
+    ]
+
+    await db_insert("documents", rows)
+
+    return {
+        "message":       "Ingested successfully",
+        "chunks_stored": len(rows),
+        "doc_name":      filename,
+        "file_url":      file_url,
+    }

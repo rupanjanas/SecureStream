@@ -57,14 +57,17 @@ async function initializeClient() {
 
 initializeClient().catch(console.error);
 
+// In server.js — update session config:
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,   // ← false: don't save empty sessions
   cookie: {
-  secure: true,
-  sameSite: "none"
-}
+    secure:   true,
+    sameSite: "none",
+    maxAge:   7 * 24 * 60 * 60 * 1000,  // ← 7 days, survives app backgrounding
+    httpOnly: true,
+  }
 }));
 
 const checkClientReady = (req, res, next) => {
@@ -189,14 +192,20 @@ app.post('/org/create', async (req, res) => {
 });
 
 // Join org via invite token
-app.get('/org/join/:token', checkAuth, async (req, res) => {
+// In server.js — replace the /org/join/:token route entirely:
+app.get('/org/join/:token', async (req, res) => {
   const { token } = req.params;
   const user = req.session.userInfo;
 
+  // Not logged in — save invite token to session then redirect to login
   if (!user) {
-    return res.redirect(`${process.env.FRONTEND_URL}/login?redirect=/org/join/${token}`);
+    req.session.pendingInviteToken = token;
+    return req.session.save(() => {
+      res.redirect(`${process.env.FRONTEND_URL}/login?redirect=/org/join/${token}`);
+    });
   }
 
+  // Look up the invite
   const { data: invite, error } = await supabaseAdmin
     .from('invite_tokens')
     .select('*, orgs(*)')
@@ -204,13 +213,13 @@ app.get('/org/join/:token', checkAuth, async (req, res) => {
     .single();
 
   if (error || !invite) {
-    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_invite`);
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`);
   }
   if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
-    return res.redirect(`${process.env.FRONTEND_URL}?error=expired_invite`);
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
   }
 
-  // Add member
+  // Add as member
   await supabaseAdmin.from('org_members').upsert({
     org_id:   invite.org_id,
     user_sub: user.sub,
@@ -218,19 +227,17 @@ app.get('/org/join/:token', checkAuth, async (req, res) => {
     role:     'member'
   }, { onConflict: 'org_id,user_sub' });
 
-  // Set session to this org immediately
+  // Set org session
   req.session.orgId   = invite.org_id;
   req.session.orgName = invite.orgs.name;
   req.session.mode    = 'org';
-
-  // Add to memberships in session
   req.session.memberships = [
     ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
     { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } }
   ];
 
   req.session.save(() => {
-    // Redirect directly to dashboard in org mode
+    // Go straight to dashboard in org mode — no workspace select
     res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
   });
 });
@@ -282,7 +289,6 @@ app.get('/login', checkClientReady, (req, res) => {
     });
 });
 
-// Replace your /callback route with this:
 app.get('/callback', checkClientReady, async (req, res) => {
   try {
     const params   = client.callbackParams(req);
@@ -295,14 +301,13 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const userInfo = await client.userinfo(tokenSet.access_token);
     req.session.userInfo = userInfo;
     req.session.tokens = {
-  access_token: tokenSet.access_token,
-  id_token: tokenSet.id_token,
-  refresh_token: tokenSet.refresh_token
-};
+      access_token:  tokenSet.access_token,
+      id_token:      tokenSet.id_token,
+      refresh_token: tokenSet.refresh_token
+    };
     delete req.session.nonce;
     delete req.session.state;
 
-    // Look up all orgs this user belongs to
     const { data: memberships } = await supabaseAdmin
       .from('org_members')
       .select('org_id, role, orgs(id, name)')
@@ -310,10 +315,45 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     req.session.memberships = memberships || [];
 
-    // If only one org, auto-restore it
+    // ── Handle pending invite ──────────────────────────────────
+    const pendingToken = req.session.pendingInviteToken;
+    if (pendingToken) {
+      delete req.session.pendingInviteToken;
+
+      const { data: invite } = await supabaseAdmin
+        .from('invite_tokens')
+        .select('*, orgs(*)')
+        .eq('token', pendingToken)
+        .single();
+
+      if (invite && (!invite.expires_at || new Date(invite.expires_at) > new Date())) {
+        await supabaseAdmin.from('org_members').upsert({
+          org_id:   invite.org_id,
+          user_sub: userInfo.sub,
+          email:    userInfo.email,
+          role:     'member'
+        }, { onConflict: 'org_id,user_sub' });
+
+        req.session.orgId   = invite.org_id;
+        req.session.orgName = invite.orgs.name;
+        req.session.mode    = 'org';
+        req.session.memberships = [
+          ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
+          { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } }
+        ];
+
+        return req.session.save(() => {
+          res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
+        });
+      }
+    }
+    // ────────────────────────────────────────────────────────────
+
+    // Auto-restore single org
     if (memberships?.length === 1) {
       req.session.orgId   = memberships[0].org_id;
       req.session.orgName = memberships[0].orgs?.name;
+      req.session.mode    = 'org';
     }
 
     req.session.save(() => {
@@ -372,7 +412,6 @@ app.post('/org/invite/email', checkAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.get('/logout', (req, res) => {
     req.session.destroy((err) => {
         res.clearCookie('connect.sid');   // 🔥 IMPORTANT
