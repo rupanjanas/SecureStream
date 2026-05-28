@@ -19,7 +19,7 @@ import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { askQuestionStream, getDocumentText } from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
-const AUTH_URL      = import.meta.env.VITE_BACKEND_URL;
+const AUTH_URL          = import.meta.env.VITE_BACKEND_URL;
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
 
@@ -254,7 +254,6 @@ function InviteModal({ orgName, onClose, token }) {
   const [inviteSent, setInviteSent]       = useState(false);
   const [inviteError, setInviteError]     = useState("");
   const [issuedAt] = useState(() => Date.now());
-  // Recompute whenever role changes so the displayed link is always current
   const invitePayload = useMemo(() =>
     btoa(JSON.stringify({ org: orgName, role: inviteRole, iat: issuedAt })),
     [orgName, inviteRole, issuedAt]
@@ -315,7 +314,6 @@ function InviteModal({ orgName, onClose, token }) {
             </svg>
           </button>
         </div>
-
         <div className="px-5 py-4 flex flex-col gap-5">
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Invite as</p>
@@ -332,7 +330,6 @@ function InviteModal({ orgName, onClose, token }) {
               ))}
             </div>
           </div>
-
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
             <div className="flex gap-2">
@@ -352,13 +349,11 @@ function InviteModal({ orgName, onClose, token }) {
               Anyone with this link joins as <strong>{inviteRole}</strong> and lands directly in the org workspace.
             </p>
           </div>
-
           <div className="flex items-center gap-3">
             <div className="flex-1 h-px bg-gray-100"/>
             <span className="text-xs text-gray-400">or send by email</span>
             <div className="flex-1 h-px bg-gray-100"/>
           </div>
-
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Send email invitation</p>
             <input
@@ -410,7 +405,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
             </svg>
           </button>
         </div>
-
         <div className="px-5 py-3 border-b border-gray-100 flex-shrink-0">
           <div className="relative">
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -421,7 +415,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
               className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-emerald-400 transition-colors"/>
           </div>
         </div>
-
         <div className="flex-1 overflow-y-auto px-5 py-3 flex flex-col gap-2">
           {filtered.length === 0 ? (
             <p className="text-xs text-gray-400 text-center py-8">No members found.</p>
@@ -489,7 +482,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
             })
           )}
         </div>
-
         <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex-shrink-0">
           <p className="text-xs text-gray-400 text-center">
             Only admins can remove members or change roles. Changes take effect immediately.
@@ -505,13 +497,11 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const location = useLocation();
   const navigate = useNavigate();
 
-  // Pull everything we need from navigation state once at the top.
-  // These never change for the lifetime of this page mount.
   const {
     docName  = "Document",
     docText  = "",
     file_url: fileUrl = null,
-    file:    stateFile = null,        // File object passed for personal PDFs
+    file:    stateFile = null,
   } = location.state || {};
 
   const isOrg = mode === "org";
@@ -531,44 +521,62 @@ export default function DocViewerPage({ user, mode, orgName }) {
       .catch(()  => { tokenRef.current = "dev-token"; setTokenReady(true); });
   }, []);
 
-  // ── PDF file resolution ────────────────────────────────────────────────────
-  // This is the fix for "PDF not loading".
-  //
-  // Strategy:
-  //   • Org mode  → use the remote file_url from Supabase (passed via location.state).
-  //                  Never touch localStorage or local blobs.
-  //   • Personal  → prefer the File object from location.state (freshest), fall back
-  //                  to retrieveFile() (same session), then null.
-  //
-  // The blob URL is created once and stored in a ref so it survives re-renders
-  // without being recreated (which would invalidate the react-pdf cache).
+  // ── PDF file URL resolution ────────────────────────────────────────────────
+  // FIX: Three-tier resolution:
+  //   1. file_url from navigation state (Supabase Storage URL — most reliable)
+  //   2. file_url fetched live from DB if state didn't include it (covers
+  //      navigation from pages that didn't pass it)
+  //   3. Blob URL from a local File object (personal, same upload session)
+
+  const [resolvedFileUrl, setResolvedFileUrl] = useState(fileUrl || null);
   const blobUrlRef = useRef(null);
 
-  // Create the blob URL synchronously during render the first time it's needed.
-  // We do this outside useMemo so there's no stale-closure risk with location.state.
+  // If fileUrl wasn't in navigation state, fetch it from the backend
+  useEffect(() => {
+    if (!isPDF || resolvedFileUrl || !tokenReady) return;
+
+    const fetchFileUrl = async () => {
+      try {
+        // Ask the backend for the stored file_url for this doc
+        const res = await fetch(
+          `${AUTH_URL}/documents/file-url?doc_name=${encodeURIComponent(docName)}`,
+          { headers: { Authorization: `Bearer ${tokenRef.current}` } }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data.file_url) {
+            console.log("[PDF] Fetched file_url from backend:", data.file_url);
+            setResolvedFileUrl(data.file_url);
+          }
+        }
+      } catch (err) {
+        console.warn("[PDF] Could not fetch file_url from backend:", err);
+      }
+    };
+
+    fetchFileUrl();
+  }, [isPDF, resolvedFileUrl, tokenReady, docName]);
+
   const pdfFile = useMemo(() => {
-  if (!isPDF) return null;
+    if (!isPDF) return null;
 
-  // Priority 1: remote URL from Supabase Storage (works for both org and personal)
-  // fileUrl comes from location.state.file_url set by UploadPage or Dashboard
-  if (fileUrl) {
-    console.log("[PDF] Using remote storage URL:", fileUrl);
-    return { url: fileUrl };
-  }
-
-  // Priority 2: blob from local File object (personal, same session as upload)
-  if (!blobUrlRef.current) {
-    const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
-    if (fileObj) {
-      blobUrlRef.current = URL.createObjectURL(fileObj);
-      console.log("[PDF] Using blob URL from file object");
+    // Priority 1: Supabase Storage URL (from state or fetched live)
+    if (resolvedFileUrl) {
+      console.log("[PDF] Using storage URL:", resolvedFileUrl);
+      return { url: resolvedFileUrl };
     }
-  }
 
-  return blobUrlRef.current ? { url: blobUrlRef.current } : null;
+    // Priority 2: blob from local File object (same-session upload)
+    if (!blobUrlRef.current) {
+      const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
+      if (fileObj) {
+        blobUrlRef.current = URL.createObjectURL(fileObj);
+        console.log("[PDF] Using blob URL from file object");
+      }
+    }
 
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [isPDF, fileUrl]);
+    return blobUrlRef.current ? { url: blobUrlRef.current } : null;
+  }, [isPDF, resolvedFileUrl, stateFile]);
 
   // Revoke blob on unmount
   useEffect(() => {
@@ -611,11 +619,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [showInviteModal, setShowInviteModal]   = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
 
-
   const pageRefs  = useRef({});
   const bottomRef = useRef(null);
 
-  const userEmail     = user?.email || "dev@securestream.local";
+  const userEmail      = user?.email || "dev@securestream.local";
   const sourcePassages = sourcesHistory.length > 0
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
@@ -680,11 +687,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // ── Collaboration hook ─────────────────────────────────────────────────────
   const sendAnnotationEvent = () => {};
 
   // ── Handlers ───────────────────────────────────────────────────────────────
-
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
@@ -760,99 +765,97 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   // ── Send question ──────────────────────────────────────────────────────────
   const send = async () => {
-  const question = input.trim();
-  if (!question || loading) return;
+    const question = input.trim();
+    if (!question || loading) return;
 
-  const newHistory = [...chatHistory, { role: "user", content: question }];
-  setChatHistory(newHistory);
-  setMessages((m) => [
-    ...m.filter((msg) => !msg.streaming),
-    { role: "user", content: question },
-    { role: "assistant", content: "", streaming: true },
-  ]);
-  setInput("");
-  setLoading(true);
-  setHighlights([]);
-  setHighlightedPages({});
+    const newHistory = [...chatHistory, { role: "user", content: question }];
+    setChatHistory(newHistory);
+    setMessages((m) => [
+      ...m.filter((msg) => !msg.streaming),
+      { role: "user", content: question },
+      { role: "assistant", content: "", streaming: true },
+    ]);
+    setInput("");
+    setLoading(true);
+    setHighlights([]);
+    setHighlightedPages({});
 
-  try {
-    await askQuestionStream(
-      question,
-      docName,
-      newHistory,
-      // onToken
-      (token) => {
-        setMessages((m) => {
-          const updated = [...m];
-          const last    = updated[updated.length - 1];
-          updated[updated.length - 1] = { ...last, content: last.content + token };
-          return updated;
-        });
-      },
-      // onDone
-      (sources, passages) => {
-        setChatHistory((h) => [
-          ...h,
-          { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }
-        ]);
-        setMessages((m) => {
-          const updated = [...m];
-          updated[updated.length - 1] = {
-            ...updated[updated.length - 1],
-            streaming: false,
-            sources,
-          };
-          return updated;
-        });
-
-        const newGroup = {
-          id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          question,
-          passages:  passages || [],
-          timestamp: Date.now(),
-        };
-        setSourcesHistory((prev) => [...prev, newGroup]);
-
-        const phrases = [...new Set(
-          (passages || [])
-            .sort((a, b) => b.similarity - a.similarity)
-            .map((p) => p.passage.slice(0, 120))
-        )];
-        setHighlights(phrases);
-
-        if (isPDF && passages?.length > 0) {
-          const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
-          const pageH  = {};
-          sorted.forEach((p) => {
-            const pg = p.page_number || 1;
-            if (!pageH[pg]) pageH[pg] = [];
-            pageH[pg].push(p.passage.slice(0, 120));
+    try {
+      await askQuestionStream(
+        question,
+        docName,
+        newHistory,
+        (token) => {
+          setMessages((m) => {
+            const updated = [...m];
+            const last    = updated[updated.length - 1];
+            updated[updated.length - 1] = { ...last, content: last.content + token };
+            return updated;
           });
-          setHighlightedPages(pageH);
-          setTimeout(() => {
-            const el = pageRefs.current[sorted[0].page_number || 1];
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-          }, 400);
-        }
+        },
+        (sources, passages) => {
+          setChatHistory((h) => [
+            ...h,
+            { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }
+          ]);
+          setMessages((m) => {
+            const updated = [...m];
+            updated[updated.length - 1] = {
+              ...updated[updated.length - 1],
+              streaming: false,
+              sources,
+            };
+            return updated;
+          });
 
-        setLoading(false);
-      },
-      3,    // topK
-      null  // orgId — add orgId prop to DocViewerPage and pass mode === "org" ? orgId : null
-    );
-  } catch (err) {
-    setMessages((m) => {
-      const updated = [...m];
-      updated[updated.length - 1] = {
-        ...updated[updated.length - 1],
-        content:   `Error: ${err.message}`,
-        streaming: false,
-      };
-      return updated;
-    });
-    setLoading(false);
-  }
-};
+          const newGroup = {
+            id:        `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            question,
+            passages:  passages || [],
+            timestamp: Date.now(),
+          };
+          setSourcesHistory((prev) => [...prev, newGroup]);
+
+          const phrases = [...new Set(
+            (passages || [])
+              .sort((a, b) => b.similarity - a.similarity)
+              .map((p) => p.passage.slice(0, 120))
+          )];
+          setHighlights(phrases);
+
+          if (isPDF && passages?.length > 0) {
+            const sorted = [...passages].sort((a, b) => b.similarity - a.similarity);
+            const pageH  = {};
+            sorted.forEach((p) => {
+              const pg = p.page_number || 1;
+              if (!pageH[pg]) pageH[pg] = [];
+              pageH[pg].push(p.passage.slice(0, 120));
+            });
+            setHighlightedPages(pageH);
+            setTimeout(() => {
+              const el = pageRefs.current[sorted[0].page_number || 1];
+              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+            }, 400);
+          }
+
+          setLoading(false);
+        },
+        3,
+        null
+      );
+    } catch (err) {
+      setMessages((m) => {
+        const updated = [...m];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content:   `Error: ${err.message}`,
+          streaming: false,
+        };
+        return updated;
+      });
+      setLoading(false);
+    }
+  };
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
@@ -1003,7 +1006,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             className="flex-1 overflow-y-auto"
             style={{ position: "relative" }}
           >
-            {/* Active annotation */}
             {activeAnnotation && (
               <div style={{ borderLeftColor: activeAnnotation.color }}
                 className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3">
@@ -1101,6 +1103,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     })}
                   </Document>
                 ) : (
+                  // ── Loading state while we fetch the URL ──
                   <div className="flex flex-col items-center justify-center pt-20 text-center">
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
@@ -1109,12 +1112,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       </svg>
                     </div>
                     <p className="text-sm text-gray-500 mb-1">
-                      {isOrg ? "PDF could not be loaded from storage." : "PDF preview not available"}
+                      {tokenReady ? "PDF could not be loaded." : "Loading PDF…"}
                     </p>
                     <p className="text-xs text-gray-400">
-                      {isOrg
-                        ? "The document may not have a stored file URL. Re-upload from the dashboard."
-                        : "Navigate back to the dashboard and re-open the document."}
+                      {tokenReady
+                        ? "The file URL could not be resolved. Try re-uploading the document."
+                        : "Fetching document URL from storage…"}
                     </p>
                   </div>
                 )}

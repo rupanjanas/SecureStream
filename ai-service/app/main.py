@@ -396,6 +396,36 @@ async def list_documents(
 
     return {"documents": docs, "org_id": org_id}
 
+# ── NEW ROUTE: file URL ──────────────────────────────────────────────────────
+
+@app.get("/documents/file-url")
+async def get_document_file_url(
+    doc_name: str,
+    claims: dict = Depends(verify_token),
+):
+    org_id = claims.get("custom:org_id") or claims.get("sub")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id": f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "select": "file_url",
+                "limit": 1,
+            },
+        )
+
+        rows = r.json()
+
+    if not rows or not rows[0].get("file_url"):
+        raise HTTPException(
+            status_code=404,
+            detail="file_url not found for this document",
+        )
+
+    return {"file_url": rows[0]["file_url"]}
 
 # ── Full document text ───────────────────────────────────────────────────────
 
