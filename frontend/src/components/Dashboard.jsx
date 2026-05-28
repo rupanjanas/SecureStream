@@ -136,8 +136,8 @@ export default function Dashboard({ user, orgId, orgName, mode }) {
                   onClick={() => navigate("/doc-viewer", {
                     state: {
                       docName: doc.doc_name,
-                      fileUrl: doc.file_url
-                    }
+                      file_url: doc.file_url
+              }
                   })}
                   className="w-full flex items-center gap-4 px-5 py-3.5 hover:bg-gray-50 transition-colors text-left group"
                 >
