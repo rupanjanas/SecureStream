@@ -935,11 +935,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0">
-              {!isPDF && highlights.length > 0 && (
-                <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-lg">
-                  {highlights.length} highlights
-                </span>
-              )}
               {sourcesHistory.length > 0 && (
                 <button
                   onClick={() => setShowSourcesPanel((v) => !v)}
@@ -955,9 +950,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   {totalSourceCount} source{totalSourceCount !== 1 ? "s" : ""}
                 </button>
               )}
-              <span className="text-xs text-gray-400">
-                {myAnnotations.length} note{myAnnotations.length !== 1 ? "s" : ""}
-              </span>
               {isOrg && members.length > 0 && (
                 <div className="flex items-center gap-2 pl-2 border-l border-emerald-200">
                   <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
@@ -1002,21 +994,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
               )}
             </div>
           </div>
-
-          {sharedAnnotations.length > 0 && (
-            <div className="px-5 py-2 border-b border-gray-100 bg-blue-50 flex items-center gap-2 flex-shrink-0 overflow-x-auto">
-              <span className="text-xs text-blue-600 font-medium flex-shrink-0">Shared by team:</span>
-              {sharedAnnotations.map((ann) => (
-                <button key={ann.id}
-                  onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
-                  style={{ borderColor: ann.color, backgroundColor: ann.color + "30" }}
-                  className="text-xs border rounded-lg px-2 py-1 text-gray-700 hover:opacity-80 transition-opacity flex-shrink-0">
-                  {ann.user_email?.split("@")[0]} · "{ann.selected_text.slice(0, 20)}..."
-                </button>
-              ))}
-            </div>
-          )}
-
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
             className="flex-1 overflow-y-auto"

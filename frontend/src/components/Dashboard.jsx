@@ -175,7 +175,7 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
                       {doc.doc_name}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      {doc.chunks} chunks · {new Date(doc.created_at).toLocaleDateString("en-IN", {
+                      {new Date(doc.created_at).toLocaleDateString("en-IN", {
                         day: "numeric", month: "short", year: "numeric"
                       })}
                     </p>
