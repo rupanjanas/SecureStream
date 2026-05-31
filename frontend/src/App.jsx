@@ -49,6 +49,16 @@ function LoadingScreen() {
   );
 }
 
+// ── isTokenExpired helper ────────────────────────────────────────────────────
+function isTokenExpired(token) {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return payload.exp * 1000 < Date.now() + 30_000;
+  } catch {
+    return false;
+  }
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [user,    setUser]    = useState(null);
@@ -56,37 +66,60 @@ export default function App() {
   const [orgName, setOrgName] = useState(null);
   const [mode,    setMode]    = useState(null);
   const [loading, setLoading] = useState(true);  // authLoading
-  const [accessToken, setAccessToken] = useState(null);
+  const [accessToken, setAccessToken] = useState(null); 
 
-  useEffect(() => {
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 8000);
+  // App.jsx — update the session fetch block:
 
-    fetch(`${AUTH_URL}/`, {
-      credentials: "include",
-      signal:      controller.signal,
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        clearTimeout(timeout);
-        if (data.isAuthenticated) {
-          setUser(data.user);
-          setMode(data.mode     || "personal");
-          setOrgId(data.orgId   || null);
-          setOrgName(data.orgName || null);
-          setAccessToken(data.access_token || null);
-        }
-        setLoading(false);
-      })
-      .catch((err) => {
-        clearTimeout(timeout);
-        if (err.name !== "AbortError") console.error("Session fetch failed:", err);
-        setLoading(false);
+useEffect(() => {
+  const controller = new AbortController();
+  const timeout    = setTimeout(() => controller.abort(), 8000);
+
+  const initSession = async () => {
+    try {
+      const res  = await fetch(`${AUTH_URL}/`, {
+        credentials: "include",
+        signal:      controller.signal,
       });
+      const data = await res.json();
 
-    return () => { clearTimeout(timeout); controller.abort(); };
-  }, []);
+      if (!data.isAuthenticated) {
+        setLoading(false);
+        return;
+      }
 
+      // Check if token is already expired and refresh proactively
+      let accessToken = data.access_token;
+      if (accessToken && isTokenExpired(accessToken)) {
+        const refreshRes = await fetch(`${AUTH_URL}/refresh`, {
+          method:      "POST",
+          credentials: "include",
+        });
+        if (refreshRes.ok) {
+          const refreshed = await refreshRes.json();
+          accessToken = refreshed.access_token;
+        } else {
+          // Can't refresh — user needs to log in again
+          setLoading(false);
+          return;
+        }
+      }
+
+      setUser(data.user);
+      setMode(data.mode       || "personal");
+      setOrgId(data.orgId     || null);
+      setOrgName(data.orgName || null);
+      setAccessToken(accessToken);
+    } catch (err) {
+      if (err.name !== "AbortError") console.error("Session fetch failed:", err);
+    } finally {
+      clearTimeout(timeout);
+      setLoading(false);
+    }
+  };
+
+  initSession();
+  return () => { clearTimeout(timeout); controller.abort(); };
+}, []);
   // ── Router wraps EVERYTHING including the loading screen ──────────────────
   // This guarantees useLocation/useNavigate always have a valid context,
   // regardless of whether the session fetch has completed yet.

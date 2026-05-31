@@ -82,6 +82,37 @@ const checkAuth = (req, res, next) => {
     next();
 };
 
+// server.js — add this route after your existing routes
+
+app.post('/refresh', async (req, res) => {
+  const refreshToken = req.session.tokens?.refresh_token;
+
+  if (!refreshToken) {
+    return res.status(401).json({ error: "No refresh token — please log in again." });
+  }
+
+  try {
+    // Use openid-client to get new tokens using the refresh token
+    const tokenSet = await client.refresh(refreshToken);
+
+    // Update session with new tokens
+    req.session.tokens = {
+      access_token:  tokenSet.access_token,
+      id_token:      tokenSet.id_token,
+      // Cognito may not rotate refresh tokens — keep old one if no new one issued
+      refresh_token: tokenSet.refresh_token || refreshToken,
+    };
+
+    return req.session.save(() => {
+      res.json({ access_token: tokenSet.access_token });
+    });
+  } catch (err) {
+    console.error("Token refresh failed:", err.message);
+    // Refresh token itself is expired — force re-login
+    return res.status(401).json({ error: "Session expired — please log in again." });
+  }
+});
+
 app.get('/', (req, res) => {
   console.log("SESSION ROOT:", req.session);
 
