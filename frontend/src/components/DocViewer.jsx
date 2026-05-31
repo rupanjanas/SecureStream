@@ -249,16 +249,16 @@ function InviteModal({ orgName, onClose, token }) {
   const [sendingInvite, setSendingInvite] = useState(false);
   const [inviteSent, setInviteSent]       = useState(false);
   const [inviteError, setInviteError]     = useState("");
-  const [issuedAt] = useState(() => Date.now());
-  const invitePayload = useMemo(() =>
-    btoa(JSON.stringify({ org: orgName, role: inviteRole, iat: issuedAt })),
-    [orgName, inviteRole, issuedAt]
-  );
-  const inviteLink =
-    `${window.location.origin}/join` +
-    `?org=${encodeURIComponent(orgName)}` +
-    `&token=${encodeURIComponent(invitePayload)}` +
-    `&role=${encodeURIComponent(inviteRole)}`;
+  const [inviteLink, setInviteLink] = useState("");
+  useEffect(() => {
+  fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    // no body needed — server reads orgId from session
+  })
+    .then(r => r.json())
+    .then(d => setInviteLink(d.inviteUrl)); // server returns full URL with UUID token
+}, [token]);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteLink).then(() => {
@@ -275,14 +275,12 @@ function InviteModal({ orgName, onClose, token }) {
     setInviteError("");
     setSendingInvite(true);
     try {
-      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite/email`, {
         method:  "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           email:       inviteEmail.trim(),
-          role:        inviteRole,
-          org_name:    orgName,
-          invite_link: inviteLink,
+          inviteUrl: inviteLink,
         }),
       });
       if (!res.ok) throw new Error("Server error");
@@ -492,7 +490,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const navigate = useNavigate();
 
   const {
-    docName  = "Document",
+    docName  = "",
     docText  = "",
     file_url: fileUrl = null,
     file:    stateFile = null,
@@ -612,6 +610,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
   useEffect(() => {
     if (sourcesHistory.length) saveToStorage(SOURCES_KEY, sourcesHistory);
   }, [sourcesHistory, SOURCES_KEY]);
+
+  useEffect(() => {
+  if (!docName) {
+    navigate("/dashboard", { replace: true });
+  }
+}, [docName, navigate]);
 
   useEffect(() => {
     if (!docName || !tokenReady) return;

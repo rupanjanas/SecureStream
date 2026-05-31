@@ -1,14 +1,33 @@
-import { useEffect, useState} from "react";
+import { useEffect, useState, useLocation} from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { getHealth, listDocuments, getSession } from "../api/aiService";
 
-export default function Dashboard({ user, orgId, orgName, mode }) {
+export default function Dashboard({ user, orgId, orgName, mode, setMode, setOrgId, setOrgName }) {
   const navigate = useNavigate();
   const [health, setHealth] = useState(null);
   const [docs, setDocs] = useState([]);
   const [docsLoading, setDocsLoading] = useState(true);
+  const location = useLocation();
 
+  useEffect(() => {
+    const { joinedOrg } = location.state || {};
+    if (joinedOrg) {
+      // Re-fetch session to get the updated org context the server set
+      fetch(`${import.meta.env.VITE_BACKEND_URL}/`, { credentials: "include" })
+        .then(r => r.json())
+        .then(d => {
+          if (d.isAuthenticated) {
+            setMode(d.mode);
+            setOrgId(d.orgId);
+            setOrgName(d.orgName);
+          }
+        });
+      // Clear state so a refresh doesn't re-trigger
+      window.history.replaceState({}, "", "/dashboard");
+    }
+  }, []);
+  
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth({ status: "error" }));
   }, []);

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from "react-router-dom";
 import LandingPage    from "./components/landingPage";
 import OnboardingPage from "./components/Onboarding";
 import OrgSetupPage   from "./components/OrgSetUp";
@@ -13,10 +12,7 @@ import JoinPage from "./components/joinPage";
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 function ProtectedRoute({ user, children }) {
-  useEffect(() => {
-    if (!user) window.location.href = `${AUTH_URL}/login`;
-  }, [user]);
-  if (!user) return null;
+  if (!user) return <Navigate to="/" replace />;  // soft redirect, no reload
   return children;
 }
 function JoinOrgRedirect() {
@@ -107,7 +103,10 @@ useEffect(() => {
 }/>
         <Route path="/dashboard" element={
           <ProtectedRoute user={user}>
-            <Dashboard user={user} orgId={orgId} orgName={orgName} mode={mode} />
+            <Dashboard
+             user={user} orgId={orgId} orgName={orgName} mode={mode}
+            setMode={setMode} setOrgId={setOrgId} setOrgName={setOrgName}  // ← add these
+            />
           </ProtectedRoute>
         }/>
         <Route path="/upload" element={
