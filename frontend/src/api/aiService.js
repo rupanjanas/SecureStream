@@ -1,5 +1,5 @@
-const AUTH_URL = import.meta.env.VITE_BACKEND_URL;  // Express server (auth/session)
-const AI_URL   = import.meta.env.VITE_AI_SERVICE_URL; // Python AI service (docs/ingest)
+const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
+const AI_URL   = import.meta.env.VITE_AI_SERVICE_URL;
 
 // ── Session ────────────────────────────────────────────────────────────────────
 export async function getSession() {
@@ -9,8 +9,6 @@ export async function getSession() {
     const data = await res.json();
     if (!data.isAuthenticated) return null;
 
-    // Check if the access token is expired by decoding the JWT payload
-    // (no signature check needed here — server validates on use)
     if (data.access_token && isTokenExpired(data.access_token)) {
       return await refreshSession();
     }
@@ -21,32 +19,25 @@ export async function getSession() {
   }
 }
 
-// Decode JWT payload and check exp claim — no library needed
 function isTokenExpired(token) {
   try {
     const payload = JSON.parse(atob(token.split(".")[1]));
-    // exp is in seconds, Date.now() in milliseconds
-    // subtract 30s buffer so we refresh slightly before actual expiry
     return payload.exp * 1000 < Date.now() + 30_000;
   } catch {
-    return false; // if we can't decode, assume valid and let server decide
+    return false;
   }
 }
 
-// Call Express /refresh which uses the stored refresh_token in the session cookie
 async function refreshSession() {
   try {
     const res = await fetch(`${AUTH_URL}/refresh`, {
       method:      "POST",
-      credentials: "include",   // ← sends session cookie so server knows who to refresh
+      credentials: "include",
     });
-
     if (!res.ok) {
-      // Refresh token expired — redirect to login
       window.location.href = `${AUTH_URL}/login`;
       return null;
     }
-
     const { access_token } = await res.json();
     return { access_token, isAuthenticated: true };
   } catch {
@@ -55,7 +46,7 @@ async function refreshSession() {
 }
 
 async function getFreshToken() {
-  const session = await getSession(); // getSession already handles refresh
+  const session = await getSession();
   if (!session?.access_token) {
     throw new Error("Session expired — please log in again.");
   }
@@ -74,8 +65,6 @@ export async function getHealth() {
 }
 
 // ── Upload / Ingest ────────────────────────────────────────────────────────────
-// Hits AI_URL/ingest — do NOT set Content-Type manually with FormData,
-// the browser sets it automatically with the correct multipart boundary.
 export async function uploadDocument(file, token, orgId = null) {
   if (!token) throw new Error("No access token — cannot upload");
 
@@ -87,7 +76,7 @@ export async function uploadDocument(file, token, orgId = null) {
 
   const res = await fetch(`${AI_URL}/ingest`, {
     method:  "POST",
-    headers,           // ← no Content-Type here — browser sets multipart boundary
+    headers,
     body:    formData,
   });
 
@@ -99,7 +88,6 @@ export async function uploadDocument(file, token, orgId = null) {
 }
 
 // ── List Documents ─────────────────────────────────────────────────────────────
-// Hits AI_URL/documents — NOT AUTH_URL
 export async function listDocuments(token, orgId = null) {
   if (!token || isTokenExpired(token)) {
     const session = await getSession();
@@ -148,12 +136,8 @@ export async function askQuestionStream(
   topK  = 5,
   orgId = null,
 ) {
-  // Always get a fresh token — don't rely on a stale tokenRef from component
   const token = await getFreshToken();
-
-  if (!token) {
-    throw new Error("Session expired — please log in again.");
-  }
+  if (!token) throw new Error("Session expired — please log in again.");
 
   const headers = {
     "Content-Type": "application/json",
@@ -168,7 +152,7 @@ export async function askQuestionStream(
     body: JSON.stringify({
       question,
       top_k:        topK,
-      doc_name:     docName  || null,
+      doc_name:     docName || null,
       chat_history: Array.isArray(chatHistory) ? chatHistory.slice(-6) : [],
     }),
   });
@@ -188,7 +172,7 @@ export async function askQuestionStream(
 
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
-    buffer = lines.pop(); // keep incomplete last line for next chunk
+    buffer = lines.pop();
 
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
@@ -197,8 +181,49 @@ export async function askQuestionStream(
         if (data.token && !data.done) onToken(data.token);
         if (data.done) onDone(data.sources || [], data.source_passages || []);
       } catch {
-        continue; // skip malformed SSE lines
+        continue;
       }
     }
   }
+}
+
+// ── Shared Chat History ────────────────────────────────────────────────────────
+// Stored in Supabase per (org_id, doc_name) so all org members see the same
+// history. orgId must be the actual UUID from the session, not the org name.
+
+export async function getSharedChatHistory(docName, token, orgId) {
+  if (!token || !docName || !orgId) return { messages: [], sources: [] };
+
+  try {
+    const res = await fetch(
+      `${AI_URL}/chat-history/${encodeURIComponent(docName)}`,
+      {
+        credentials: "include",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Org-Id":    orgId,
+        },
+      }
+    );
+    if (!res.ok) return { messages: [], sources: [] };
+    return res.json();
+  } catch {
+    return { messages: [], sources: [] };
+  }
+}
+
+export async function saveSharedChatHistory(docName, messages, sources, token, orgId) {
+  if (!token || !docName || !orgId) return;
+
+  // Fire-and-forget — never blocks the UI
+  fetch(`${AI_URL}/chat-history`, {
+    method:      "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization:  `Bearer ${token}`,
+      "X-Org-Id":     orgId,
+    },
+    body: JSON.stringify({ doc_name: docName, messages, sources }),
+  }).catch((err) => console.warn("[chat-history] save failed:", err));
 }

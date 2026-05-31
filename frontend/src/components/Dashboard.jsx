@@ -27,7 +27,7 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
       // Clear state so a refresh doesn't re-trigger
       window.history.replaceState({}, "", "/dashboard");
     }
-  }, []);
+  }, [location.state, setMode, setOrgId, setOrgName]);
   
   useEffect(() => {
     getHealth().then(setHealth).catch(() => setHealth({ status: "error" }));

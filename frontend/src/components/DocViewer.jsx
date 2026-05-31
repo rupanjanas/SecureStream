@@ -9,14 +9,14 @@ import {
   updateAnnotation,
   deleteAnnotation,
   toggleShareAnnotation,
-  getOrgMembers,
+  getOrgMembers,  
   getOnlineMembers,
   pingPresence,
 } from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { askQuestionStream, getDocumentText } from "../api/aiService";
+import { askQuestionStream, getDocumentText, getSharedChatHistory, saveSharedChatHistory } from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AUTH_URL          = import.meta.env.VITE_BACKEND_URL;
@@ -546,12 +546,23 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const SOURCES_KEY = sourcesKey(docName);
 
   const tokenRef = useRef(null);
+  const orgIdRef = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
-
+  // ── Load shared chat history for org members ─────────────────────────────
+useEffect(() => {
+  if (!isOrg || !tokenReady || !docName) return;
+  getSharedChatHistory(docName, tokenRef.current, orgIdRef.current)
+    .then(({ messages: msgs, sources }) => {
+      setMessages((msgs || []).filter((m) => !m.streaming && m.content));
+      setSourcesHistory(sources || []);
+      setSharedHistoryLoaded(true);
+    })
+    .catch(() => setSharedHistoryLoaded(true));
+}, [isOrg, tokenReady, docName]);
   useEffect(() => {
     fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
-      .then((d) => { tokenRef.current = d.access_token || "dev-token"; setTokenReady(true); })
+      .then((d) => { tokenRef.current = d.access_token || "dev-token";orgIdRef.current = d.orgId || null;  setTokenReady(true); })
       .catch(()  => { tokenRef.current = "dev-token"; setTokenReady(true); });
   }, []);
 
@@ -608,11 +619,15 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, []);
 
   const [messages, setMessages] = useState(() =>
-    loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
-  );
-  const [sourcesHistory, setSourcesHistory] = useState(() =>
-    loadFromStorage(sourcesKey(docName), [])
-  );
+  isOrg
+    ? []
+    : loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
+);
+const [sourcesHistory, setSourcesHistory] = useState(() =>
+  isOrg
+    ? []
+    : loadFromStorage(sourcesKey(docName), [])
+);
   const [chatHistory, setChatHistory]           = useState([]);
   const [input, setInput]                       = useState("");
   const [loading, setLoading]                   = useState(false);
@@ -636,6 +651,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
   const [showInviteModal, setShowInviteModal]   = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
+  const [sharedHistoryLoaded, setSharedHistoryLoaded] = useState(!isOrg);
 
   const pageRefs  = useRef({});
   const bottomRef = useRef(null);
@@ -646,13 +662,23 @@ export default function DocViewerPage({ user, mode, orgName }) {
     : [];
 
   useEffect(() => {
-    const settled = messages.filter((m) => !m.streaming && m.content);
-    if (settled.length) saveToStorage(CHAT_KEY, settled);
-  }, [messages, CHAT_KEY]);
+  const settled = messages.filter((m) => !m.streaming && m.content);
+  if (!settled.length || !sharedHistoryLoaded) return;
 
-  useEffect(() => {
-    if (sourcesHistory.length) saveToStorage(SOURCES_KEY, sourcesHistory);
-  }, [sourcesHistory, SOURCES_KEY]);
+  if (isOrg && tokenReady && orgIdRef.current) {
+    const t = setTimeout(() => {
+      saveSharedChatHistory(docName, settled, sourcesHistory, tokenRef.current, orgIdRef.current);
+    }, 2000);
+    return () => clearTimeout(t);
+  } else if (!isOrg) {
+    saveToStorage(CHAT_KEY, settled);
+  }
+}, [messages, sourcesHistory, isOrg, tokenReady, sharedHistoryLoaded, docName, CHAT_KEY]);
+
+useEffect(() => {
+  if (!sourcesHistory.length || !sharedHistoryLoaded) return;
+  if (!isOrg) saveToStorage(SOURCES_KEY, sourcesHistory);
+}, [sourcesHistory, isOrg, sharedHistoryLoaded, SOURCES_KEY]);
 
   useEffect(() => {
   if (!docName) {
@@ -881,7 +907,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
-  const sharedAnnotations = safeAnnotations.filter((a) => a.is_shared && a.user_email !== userEmail);
   const displayText       = docText || fetchedText;
   const parts             = highlightText(displayText, highlights);
   const onlineCount       = onlineSet.size;
@@ -1223,11 +1248,15 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   <p className="text-sm font-semibold text-gray-900">Ask AI</p>
                   <button
                     onClick={() => {
-                      localStorage.removeItem(CHAT_KEY);
-                      localStorage.removeItem(SOURCES_KEY);
-                      setMessages([]); setSourcesHistory([]); setChatHistory([]);
-                      setHighlights([]); setHighlightedPages({});
-                    }}
+                    if (isOrg && tokenReady && orgIdRef.current) {
+                    saveSharedChatHistory(docName, [], [], tokenRef.current, orgIdRef.current);
+                   } else {
+                    localStorage.removeItem(CHAT_KEY);
+                    localStorage.removeItem(SOURCES_KEY);
+               }
+                  setMessages([]); setSourcesHistory([]); setChatHistory([]);
+                  setHighlights([]); setHighlightedPages({});
+                  }}
                     className="text-xs text-gray-400 hover:text-red-400 transition-colors">
                     Clear
                   </button>
@@ -1245,8 +1274,16 @@ export default function DocViewerPage({ user, mode, orgName }) {
           </div>
 
           <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
-            {messages.length === 0 && (
-              <div className="text-center mt-10">
+            {!sharedHistoryLoaded ? (
+  <div className="flex items-center justify-center mt-10 gap-2 text-gray-400">
+    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <path d="M21 12a9 9 0 11-6.219-8.56"/>
+    </svg>
+    <span className="text-xs">Loading shared chat history…</span>
+  </div>
+) : messages.length === 0 && (
+  <div className="text-center mt-10">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 ${isOrg ? "bg-emerald-50" : "bg-blue-50"}`}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                     stroke={isOrg ? "#0F6E56" : "#185FA5"} strokeWidth="2" strokeLinecap="round">

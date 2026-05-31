@@ -56,6 +56,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+class ChatHistoryBody(BaseModel):
+    doc_name:  str
+    messages:  list
+    sources:   list
 
 # ── Rate limiting (query endpoints only) ─────────────────────────────────────
 
@@ -427,6 +431,62 @@ async def get_document_file_url(
 
     return {"file_url": rows[0]["file_url"]}
 
+@app.get("/chat-history/{doc_name}")
+async def get_chat_history(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = x_org_id.strip() or claims.get("custom:org_id") or claims.get("sub")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/chat_history",
+            headers=HEADERS,
+            params={
+                "org_id":   f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "select":   "messages,sources",
+                "limit":    "1",
+            },
+        )
+        data = r.json()
+
+    if not data or not isinstance(data, list) or len(data) == 0:
+        return {"messages": [], "sources": []}
+    return {
+        "messages": data[0].get("messages", []),
+        "sources":  data[0].get("sources",  []),
+    }
+
+
+@app.post("/chat-history")
+async def save_chat_history(
+    body:     ChatHistoryBody,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = x_org_id.strip() or claims.get("custom:org_id") or claims.get("sub")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{BASE}/rest/v1/chat_history",
+            headers={
+                **HEADERS,
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json={
+                "org_id":     org_id,
+                "doc_name":   body.doc_name,
+                "messages":   body.messages,
+                "sources":    body.sources,
+                "updated_at": "now()",
+            },
+        )
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=500, detail="Failed to save chat history")
+        data = r.json()
+        return data[0] if isinstance(data, list) else data
 # ── Full document text ───────────────────────────────────────────────────────
 
 @app.get("/documents/{doc_name}/text")
