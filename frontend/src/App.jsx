@@ -56,6 +56,7 @@ export default function App() {
   const [orgName, setOrgName] = useState(null);
   const [mode,    setMode]    = useState(null);
   const [loading, setLoading] = useState(true);  // authLoading
+  const [accessToken, setAccessToken] = useState(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -73,6 +74,7 @@ export default function App() {
           setMode(data.mode     || "personal");
           setOrgId(data.orgId   || null);
           setOrgName(data.orgName || null);
+          setAccessToken(data.access_token || null);
         }
         setLoading(false);
       })
@@ -121,6 +123,7 @@ export default function App() {
                 orgId={orgId}
                 orgName={orgName}
                 mode={mode}
+                accessToken={accessToken} 
                 setMode={setMode}
                 setOrgId={setOrgId}
                 setOrgName={setOrgName}
@@ -129,7 +132,7 @@ export default function App() {
           }/>
           <Route path="/upload" element={
             <ProtectedRoute user={user} loading={loading}>
-              <UploadPage user={user} mode={mode} orgId={orgId} />
+              <UploadPage user={user} mode={mode} orgId={orgId} accessToken={accessToken} />
             </ProtectedRoute>
           }/>
           <Route path="/chat" element={
@@ -139,7 +142,7 @@ export default function App() {
           }/>
           <Route path="/doc-viewer" element={
             <ProtectedRoute user={user} loading={loading}>
-              <DocViewerPage user={user} mode={mode} orgName={orgName} />
+              <DocViewerPage user={user} mode={mode} orgName={orgName} accessToken={accessToken}  />
             </ProtectedRoute>
           }/>
 
