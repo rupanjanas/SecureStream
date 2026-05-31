@@ -23,7 +23,6 @@ const AUTH_URL          = import.meta.env.VITE_BACKEND_URL;
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
 
-// ── Storage helpers ──────────────────────────────────────────────────────────
 function chatKey(docName)    { return `chat_v2_${docName}`; }
 function sourcesKey(docName) { return `sources_v2_${docName}`; }
 
@@ -35,7 +34,7 @@ function loadFromStorage(key, fallback) {
 }
 
 function saveToStorage(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) { void error; }
 }
 
 function escapeRegex(str) {
@@ -84,7 +83,6 @@ function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// ── Member Avatar ────────────────────────────────────────────────────────────
 function MemberAvatar({ member, isOnline, isCurrent }) {
   const [showTip, setShowTip] = useState(false);
   return (
@@ -111,7 +109,6 @@ function MemberAvatar({ member, isOnline, isCurrent }) {
   );
 }
 
-// ── Sources Panel ────────────────────────────────────────────────────────────
 function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   const groups        = [...sourcesHistory].reverse();
   const totalPassages = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
@@ -245,7 +242,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   );
 }
 
-// ── Invite Modal ─────────────────────────────────────────────────────────────
 function InviteModal({ orgName, onClose, token }) {
   const [copied, setCopied]               = useState(false);
   const [inviteEmail, setInviteEmail]     = useState("");
@@ -379,7 +375,6 @@ function InviteModal({ orgName, onClose, token }) {
   );
 }
 
-// ── Manage Members Modal ─────────────────────────────────────────────────────
 function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMember, onChangeRole }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [removingId, setRemovingId]   = useState(null);
@@ -492,7 +487,6 @@ function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMe
   );
 }
 
-// ── Main Page ────────────────────────────────────────────────────────────────
 export default function DocViewerPage({ user, mode, orgName }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -510,8 +504,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const CHAT_KEY    = chatKey(docName);
   const SOURCES_KEY = sourcesKey(docName);
 
-  // ── Auth token ─────────────────────────────────────────────────────────────
-  const tokenRef     = useRef(null);
+  const tokenRef = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
 
   useEffect(() => {
@@ -521,64 +514,49 @@ export default function DocViewerPage({ user, mode, orgName }) {
       .catch(()  => { tokenRef.current = "dev-token"; setTokenReady(true); });
   }, []);
 
-  // ── PDF file URL resolution ────────────────────────────────────────────────
-  // FIX: Three-tier resolution:
-  //   1. file_url from navigation state (Supabase Storage URL — most reliable)
-  //   2. file_url fetched live from DB if state didn't include it (covers
-  //      navigation from pages that didn't pass it)
-  //   3. Blob URL from a local File object (personal, same upload session)
-
   const [resolvedFileUrl, setResolvedFileUrl] = useState(fileUrl || null);
-  const blobUrlRef = useRef(null);
+  const [manualFile, setManualFile]           = useState(null);
+  const blobUrlRef  = useRef(null);
+  const fileInputRef = useRef(null);
 
-  // If fileUrl wasn't in navigation state, fetch it from the backend
   useEffect(() => {
     if (!isPDF || resolvedFileUrl || !tokenReady) return;
-
     const fetchFileUrl = async () => {
       try {
-        // Ask the backend for the stored file_url for this doc
         const res = await fetch(
           `${AUTH_URL}/documents/file-url?doc_name=${encodeURIComponent(docName)}`,
           { headers: { Authorization: `Bearer ${tokenRef.current}` } }
         );
         if (res.ok) {
           const data = await res.json();
-          if (data.file_url) {
-            console.log("[PDF] Fetched file_url from backend:", data.file_url);
-            setResolvedFileUrl(data.file_url);
-          }
+          if (data.file_url) setResolvedFileUrl(data.file_url);
         }
       } catch (err) {
         console.warn("[PDF] Could not fetch file_url from backend:", err);
       }
     };
-
     fetchFileUrl();
   }, [isPDF, resolvedFileUrl, tokenReady, docName]);
 
+  const handleManualFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file || file.type !== "application/pdf") return;
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+    blobUrlRef.current = URL.createObjectURL(file);
+    setManualFile(file);
+  };
+
   const pdfFile = useMemo(() => {
     if (!isPDF) return null;
-
-    // Priority 1: Supabase Storage URL (from state or fetched live)
-    if (resolvedFileUrl) {
-      console.log("[PDF] Using storage URL:", resolvedFileUrl);
-      return { url: resolvedFileUrl };
-    }
-
-    // Priority 2: blob from local File object (same-session upload)
+    if (resolvedFileUrl) return { url: resolvedFileUrl };
+    if (manualFile && blobUrlRef.current) return { url: blobUrlRef.current };
     if (!blobUrlRef.current) {
       const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
-      if (fileObj) {
-        blobUrlRef.current = URL.createObjectURL(fileObj);
-        console.log("[PDF] Using blob URL from file object");
-      }
+      if (fileObj) blobUrlRef.current = URL.createObjectURL(fileObj);
     }
-
     return blobUrlRef.current ? { url: blobUrlRef.current } : null;
-  }, [isPDF, resolvedFileUrl, stateFile]);
+  }, [isPDF, resolvedFileUrl, stateFile, manualFile]);
 
-  // Revoke blob on unmount
   useEffect(() => {
     return () => {
       if (blobUrlRef.current) {
@@ -588,7 +566,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     };
   }, []);
 
-  // ── State ──────────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState(() =>
     loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
   );
@@ -627,7 +604,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
 
-  // ── Persist messages ───────────────────────────────────────────────────────
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
     if (settled.length) saveToStorage(CHAT_KEY, settled);
@@ -637,19 +613,19 @@ export default function DocViewerPage({ user, mode, orgName }) {
     if (sourcesHistory.length) saveToStorage(SOURCES_KEY, sourcesHistory);
   }, [sourcesHistory, SOURCES_KEY]);
 
-  // ── Load document text ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!docName || !tokenReady) return;
     const t = setTimeout(async () => {
       try {
         const res = await getDocumentText(docName, tokenRef.current);
         setFetchedText(res.text || "");
-      } catch { /* silent */ }
+      } catch {
+        setFetchedText("");
+      }
     }, 400);
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
 
-  // ── Load annotations ───────────────────────────────────────────────────────
   useEffect(() => {
     if (!docName || !tokenReady) return;
     const t = setTimeout(() => {
@@ -660,7 +636,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
 
-  // ── Org: members + presence ────────────────────────────────────────────────
   useEffect(() => {
     if (!isOrg) return;
     const fetchAll = async () => {
@@ -668,7 +643,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
         const [mData, oData] = await Promise.all([getOrgMembers(), getOnlineMembers()]);
         setMembers(mData.members || []);
         setOnlineSet(new Set((oData.online || []).map((o) => o.user_sub)));
-      } catch { /* silent */ }
+      } catch {
+        setMembers([]);
+        setOnlineSet(new Set());
+      }
     };
     fetchAll();
     const iv = setInterval(fetchAll, 30000);
@@ -682,14 +660,12 @@ export default function DocViewerPage({ user, mode, orgName }) {
     return () => clearInterval(iv);
   }, [isOrg]);
 
-  // ── Auto-scroll chat ───────────────────────────────────────────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   const sendAnnotationEvent = () => {};
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
@@ -763,7 +739,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setMembers((prev) => prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m));
   };
 
-  // ── Send question ──────────────────────────────────────────────────────────
   const send = async () => {
     const question = input.trim();
     if (!question || loading) return;
@@ -857,7 +832,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }
   };
 
-  // ── Derived ────────────────────────────────────────────────────────────────
   const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
   const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
   const sharedAnnotations = safeAnnotations.filter((a) => a.is_shared && a.user_email !== userEmail);
@@ -868,7 +842,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const accentBtn         = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
   const accentFocus       = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
@@ -886,10 +859,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
       <main className="flex overflow-hidden" style={{ height: "calc(100vh - 57px)" }}>
 
-        {/* ════ LEFT — Document ════ */}
         <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-100 bg-white min-w-0">
 
-          {/* Toolbar */}
           <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
             isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
           }`}>
@@ -985,7 +956,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           </div>
 
-          {/* Shared annotations bar */}
           {sharedAnnotations.length > 0 && (
             <div className="px-5 py-2 border-b border-gray-100 bg-blue-50 flex items-center gap-2 flex-shrink-0 overflow-x-auto">
               <span className="text-xs text-blue-600 font-medium flex-shrink-0">Shared by team:</span>
@@ -1000,7 +970,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           )}
 
-          {/* Document area */}
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
             className="flex-1 overflow-y-auto"
@@ -1066,7 +1035,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
               </div>
             )}
 
-            {/* PDF renderer */}
             {isPDF ? (
               <div className="flex justify-center py-4 px-4">
                 {pdfFile ? (
@@ -1103,8 +1071,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                     })}
                   </Document>
                 ) : (
-                  // ── Loading state while we fetch the URL ──
-                  <div className="flex flex-col items-center justify-center pt-20 text-center">
+                  <div className="flex flex-col items-center justify-center pt-20 text-center px-6">
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round">
                         <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
@@ -1112,18 +1079,36 @@ export default function DocViewerPage({ user, mode, orgName }) {
                       </svg>
                     </div>
                     <p className="text-sm text-gray-500 mb-1">
-                      {tokenReady ? "PDF could not be loaded." : "Loading PDF…"}
+                      {tokenReady ? "PDF could not be loaded from storage." : "Loading PDF…"}
                     </p>
-                    <p className="text-xs text-gray-400">
+                    <p className="text-xs text-gray-400 mb-4">
                       {tokenReady
-                        ? "The file URL could not be resolved. Try re-uploading the document."
+                        ? "The file URL could not be resolved."
                         : "Fetching document URL from storage…"}
                     </p>
+                    {tokenReady && (
+                      <>
+                        <input
+                          type="file"
+                          accept="application/pdf"
+                          ref={fileInputRef}
+                          onChange={handleManualFileSelect}
+                          className="hidden"
+                        />
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className={`px-4 py-2 text-white text-xs rounded-xl transition-colors mb-2 ${accentBtn}`}>
+                          Open PDF from device
+                        </button>
+                        <p className="text-xs text-gray-400">
+                          Or re-upload the document from the dashboard to fix storage permanently.
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
             ) : (
-              /* TXT renderer */
               <div className="px-8 py-6 max-w-prose mx-auto">
                 {displayText ? (
                   <>
@@ -1167,7 +1152,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
             )}
           </div>
 
-          {/* Note panel */}
           {showNotePanel && (
             <div className="flex-shrink-0 border-t border-gray-200 bg-white px-5 py-4">
               <div className="flex items-center justify-between mb-2">
@@ -1202,13 +1186,11 @@ export default function DocViewerPage({ user, mode, orgName }) {
           )}
         </div>
 
-        {/* ════ MIDDLE — Sources panel ════ */}
         {showSourcesPanel && (
           <SourcesPanel sourcesHistory={sourcesHistory} isPDF={isPDF}
             pageRefs={pageRefs} onClose={() => setShowSourcesPanel(false)}/>
         )}
 
-        {/* ════ RIGHT — AI Chat ════ */}
         <div className="w-96 flex flex-col bg-white flex-shrink-0 border-l border-gray-100">
           <div className={`px-4 py-3 border-b flex-shrink-0 ${isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"}`}>
             <div className="flex items-center justify-between">
