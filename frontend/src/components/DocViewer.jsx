@@ -253,31 +253,39 @@ function InviteModal({ orgName, onClose, token }) {
   const [linkError, setLinkError]         = useState("");
 
   const fetchInviteLink = useCallback(() => {
-    if (!token) return;
-    // All state updates happen inside async callbacks — no synchronous setState in effect body
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
-      method:  "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+  if (!token) {
+    setLinkError("Authentication not ready. Please close and reopen.");
+    setLinkLoading(false);
+    return;
+  }
+  fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+    method:      "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization:  `Bearer ${token}`,
+    },
+  })
+    .then((r) => {
+      if (!r.ok) throw new Error(`Server returned ${r.status}`);
+      return r.json();
     })
-      .then((r) => {
-        if (!r.ok) throw new Error(`Server returned ${r.status}`);
-        return r.json();
-      })
-      .then((d) => {
-        if (!d.inviteUrl) throw new Error("No inviteUrl in response");
-        setInviteLink(d.inviteUrl);
-        setLinkError("");
-        setLinkLoading(false);
-      })
-      .catch((err) => {
-        console.error("[InviteModal] failed to fetch invite link:", err);
-        setLinkError("Could not generate invite link. Try closing and reopening.");
-        setLinkLoading(false);
-      });
-  }, [token]);
+    .then((d) => {
+      if (!d.inviteUrl) throw new Error("No inviteUrl in response");
+      setInviteLink(d.inviteUrl);
+      setLinkError("");
+      setLinkLoading(false);
+    })
+    .catch((err) => {
+      console.error("[InviteModal] fetch failed:", err.message);
+      setLinkError("Could not generate invite link. Try closing and reopening.");
+      setLinkLoading(false);
+    });
+}, [token]);
 
   useEffect(() => {
-    fetchInviteLink();
+    const id = window.setTimeout(fetchInviteLink, 0);
+    return () => window.clearTimeout(id);
   }, [fetchInviteLink]);
 
   const handleCopyLink = () => {
@@ -302,6 +310,7 @@ function InviteModal({ orgName, onClose, token }) {
     try {
       const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite/email`, {
         method:  "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ email: inviteEmail.trim(), inviteUrl: inviteLink }),
       });
@@ -884,8 +893,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
-      {showInviteModal && (
-        <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
+      {showInviteModal && tokenReady && (
+      <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
       )}
       {showMembersModal && (
         <ManageMembersModal
