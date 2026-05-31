@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
@@ -245,22 +245,43 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
 function InviteModal({ orgName, onClose, token }) {
   const [copied, setCopied]               = useState(false);
   const [inviteEmail, setInviteEmail]     = useState("");
-  const [inviteRole, setInviteRole]       = useState("member");
   const [sendingInvite, setSendingInvite] = useState(false);
   const [inviteSent, setInviteSent]       = useState(false);
   const [inviteError, setInviteError]     = useState("");
-  const [inviteLink, setInviteLink] = useState("");
+  const [inviteLink, setInviteLink]       = useState("");
+  const [linkLoading, setLinkLoading]     = useState(true);  // start true
+  const [linkError, setLinkError]         = useState("");
+
+  const fetchInviteLink = useCallback(() => {
+    if (!token) return;
+    // All state updates happen inside async callbacks — no synchronous setState in effect body
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        return r.json();
+      })
+      .then((d) => {
+        if (!d.inviteUrl) throw new Error("No inviteUrl in response");
+        setInviteLink(d.inviteUrl);
+        setLinkError("");
+        setLinkLoading(false);
+      })
+      .catch((err) => {
+        console.error("[InviteModal] failed to fetch invite link:", err);
+        setLinkError("Could not generate invite link. Try closing and reopening.");
+        setLinkLoading(false);
+      });
+  }, [token]);
+
   useEffect(() => {
-  fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    // no body needed — server reads orgId from session
-  })
-    .then(r => r.json())
-    .then(d => setInviteLink(d.inviteUrl)); // server returns full URL with UUID token
-}, [token]);
+    fetchInviteLink();
+  }, [fetchInviteLink]);
 
   const handleCopyLink = () => {
+    if (!inviteLink) return;
     navigator.clipboard.writeText(inviteLink).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -272,16 +293,17 @@ function InviteModal({ orgName, onClose, token }) {
       setInviteError("Please enter a valid email address.");
       return;
     }
+    if (!inviteLink) {
+      setInviteError("Invite link not ready yet. Please wait.");
+      return;
+    }
     setInviteError("");
     setSendingInvite(true);
     try {
       const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite/email`, {
         method:  "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          email:       inviteEmail.trim(),
-          inviteUrl: inviteLink,
-        }),
+        body: JSON.stringify({ email: inviteEmail.trim(), inviteUrl: inviteLink }),
       });
       if (!res.ok) throw new Error("Server error");
       setInviteSent(true);
@@ -300,7 +322,7 @@ function InviteModal({ orgName, onClose, token }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50">
           <div>
             <p className="text-sm font-semibold text-gray-900">Invite to {orgName}</p>
-            <p className="text-xs text-gray-500">Invited users land directly in the workspace</p>
+            <p className="text-xs text-gray-500">Share the link — invited users land directly in the workspace</p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 rounded-lg p-1 hover:bg-gray-100 transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -308,47 +330,58 @@ function InviteModal({ orgName, onClose, token }) {
             </svg>
           </button>
         </div>
-        <div className="px-5 py-4 flex flex-col gap-5">
-          <div>
-            <p className="text-xs font-medium text-gray-700 mb-2">Invite as</p>
-            <div className="flex gap-2">
-              {["member", "admin", "viewer"].map((r) => (
-                <button key={r} onClick={() => setInviteRole(r)}
-                  className={`flex-1 py-1.5 rounded-xl text-xs font-medium border transition-colors capitalize ${
-                    inviteRole === r
-                      ? "bg-emerald-600 text-white border-emerald-600"
-                      : "bg-white text-gray-600 border-gray-200 hover:border-emerald-300"
-                  }`}>
-                  {r}
-                </button>
-              ))}
-            </div>
-          </div>
+
+        <div className="px-5 py-5 flex flex-col gap-5">
+
+          {/* ── Shareable link ── */}
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
-            <div className="flex gap-2">
-              <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-500 truncate select-all font-mono">
-                {inviteLink}
+
+            {linkLoading ? (
+              <div className="flex items-center gap-2 border border-gray-200 rounded-xl px-3 py-2.5 bg-gray-50">
+                <svg className="animate-spin flex-shrink-0" width="14" height="14" viewBox="0 0 24 24"
+                  fill="none" stroke="#6b7280" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                </svg>
+                <span className="text-xs text-gray-400">Generating link…</span>
               </div>
-              <button onClick={handleCopyLink}
-                className={`px-3 py-2 rounded-xl text-xs font-medium transition-all flex-shrink-0 ${
-                  copied
-                    ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200"
-                }`}>
-                {copied ? "✓ Copied" : "Copy"}
-              </button>
-            </div>
+            ) : linkError ? (
+              <div className="border border-red-200 rounded-xl px-3 py-2.5 bg-red-50">
+                <p className="text-xs text-red-500">{linkError}</p>
+                <button
+                  onClick={fetchInviteLink}
+                  className="text-xs text-red-500 underline mt-1">
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-600 truncate select-all font-mono">
+                  {inviteLink}
+                </div>
+                <button
+                  onClick={handleCopyLink}
+                  className={`px-3 py-2 rounded-xl text-xs font-medium transition-all flex-shrink-0 ${
+                    copied
+                      ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200"
+                  }`}>
+                  {copied ? "✓ Copied" : "Copy"}
+                </button>
+              </div>
+            )}
             <p className="text-xs text-gray-400 mt-1.5">
-              Anyone with this link joins as <strong>{inviteRole}</strong> and lands directly in the org workspace.
+              Anyone with this link joins <strong>{orgName}</strong> and lands directly in the workspace.
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-px bg-gray-100"/>
-            <span className="text-xs text-gray-400">or send by email</span>
-            <div className="flex-1 h-px bg-gray-100"/>
-          </div>
+
+          {/* ── Email ── */}
           <div>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex-1 h-px bg-gray-100"/>
+              <span className="text-xs text-gray-400">or send by email</span>
+              <div className="flex-1 h-px bg-gray-100"/>
+            </div>
             <p className="text-xs font-medium text-gray-700 mb-2">Send email invitation</p>
             <input
               type="email"
@@ -362,11 +395,12 @@ function InviteModal({ orgName, onClose, token }) {
             {inviteSent  && <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>}
             <button
               onClick={handleSendInvite}
-              disabled={!inviteEmail.trim() || sendingInvite}
+              disabled={!inviteEmail.trim() || sendingInvite || !inviteLink}
               className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-medium rounded-xl transition-colors">
               {sendingInvite ? "Sending…" : "Send invite"}
             </button>
           </div>
+
         </div>
       </div>
     </div>
