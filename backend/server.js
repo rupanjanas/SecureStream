@@ -11,20 +11,9 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
 
-// ── Email ────────────────────────────────────────────────────────────────────
-
-const transporter = nodemailer.createTransport({
-  host:   'smtp.gmail.com',
-  port:   587,
-  secure: false,
-  auth:   { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  tls:    { rejectUnauthorized: false },
-});
-
-transporter.verify((error) => {
-  if (error) console.error('EMAIL TRANSPORTER ERROR:', error.message);
-  else       console.log('Email server ready');
-});
+function inviteExpiresAt(days = 7) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
 
 // ── Supabase ─────────────────────────────────────────────────────────────────
 
@@ -413,6 +402,7 @@ app.post('/org/create', async (req, res) => {
       org_id:     org.id,
       token:      inviteToken,
       created_by: user.sub,
+      expires_at: inviteExpiresAt(7),
     });
 
     req.session.orgId   = org.id;
@@ -440,6 +430,7 @@ app.post('/org/invite', checkAuth, async (req, res) => {
     org_id:     orgId,
     token,
     created_by: req.session.userInfo.sub,
+    expires_at: inviteExpiresAt(7),
   });
   res.json({ inviteUrl: `${process.env.FRONTEND_URL}/org/join/${token}` });
 });
