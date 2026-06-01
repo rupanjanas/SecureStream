@@ -244,10 +244,6 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
 
 function InviteModal({ orgName, onClose, token }) {
   const [copied, setCopied]               = useState(false);
-  const [inviteEmail, setInviteEmail]     = useState("");
-  const [sendingInvite, setSendingInvite] = useState(false);
-  const [inviteSent, setInviteSent]       = useState(false);
-  const [inviteError, setInviteError]     = useState("");
   const [inviteLink, setInviteLink]       = useState("");
   const [linkLoading, setLinkLoading]     = useState(true);  // start true
   const [linkError, setLinkError]         = useState("");
@@ -294,35 +290,6 @@ function InviteModal({ orgName, onClose, token }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
-  };
-
-  const handleSendInvite = async () => {
-    if (!inviteEmail.trim() || !inviteEmail.includes("@")) {
-      setInviteError("Please enter a valid email address.");
-      return;
-    }
-    if (!inviteLink) {
-      setInviteError("Invite link not ready yet. Please wait.");
-      return;
-    }
-    setInviteError("");
-    setSendingInvite(true);
-    try {
-      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite/email`, {
-        method:  "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ email: inviteEmail.trim(), inviteUrl: inviteLink }),
-      });
-      if (!res.ok) throw new Error("Server error");
-      setInviteSent(true);
-      setInviteEmail("");
-      setTimeout(() => setInviteSent(false), 3000);
-    } catch {
-      setInviteError("Failed to send invite. Please try again.");
-    } finally {
-      setSendingInvite(false);
-    }
   };
 
   return (
@@ -383,33 +350,6 @@ function InviteModal({ orgName, onClose, token }) {
               Anyone with this link joins <strong>{orgName}</strong> and lands directly in the workspace.
             </p>
           </div>
-
-          {/* ── Email ── */}
-          <div>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex-1 h-px bg-gray-100"/>
-              <span className="text-xs text-gray-400">or send by email</span>
-              <div className="flex-1 h-px bg-gray-100"/>
-            </div>
-            <p className="text-xs font-medium text-gray-700 mb-2">Send email invitation</p>
-            <input
-              type="email"
-              value={inviteEmail}
-              onChange={(e) => { setInviteEmail(e.target.value); setInviteError(""); }}
-              onKeyDown={(e) => e.key === "Enter" && handleSendInvite()}
-              placeholder="colleague@company.com"
-              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 transition-colors mb-2"
-            />
-            {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
-            {inviteSent  && <p className="text-xs text-emerald-600 mb-2">✓ Invite sent successfully!</p>}
-            <button
-              onClick={handleSendInvite}
-              disabled={!inviteEmail.trim() || sendingInvite || !inviteLink}
-              className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-medium rounded-xl transition-colors">
-              {sendingInvite ? "Sending…" : "Send invite"}
-            </button>
-          </div>
-
         </div>
       </div>
     </div>
