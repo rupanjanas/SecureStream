@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { askQuestionStream, getSession, listDocuments } from "../api/aiService";
+import { askQuestionStream, } from "../api/aiService";
 import { generateInvite, sendEmailInvite } from "../api/orgService";
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
@@ -98,7 +98,7 @@ function InvitePanel({ onClose }) {
     try {
       const data = await generateInvite();
       setInviteUrl(data.inviteUrl);
-    } catch (err) {
+    } catch {
       setError("Failed to generate invite link.");
     } finally {
       setGenerating(false);
@@ -119,7 +119,7 @@ function InvitePanel({ onClose }) {
       await sendEmailInvite(email.trim(), inviteUrl);
       setEmailSent(true);
       setEmail("");
-    } catch (err) {
+    } catch {
       setError("Failed to send email.");
     } finally {
       setSending(false);

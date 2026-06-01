@@ -102,19 +102,6 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 
 
-# ── Models ───────────────────────────────────────────────────────────────────
-
-class AnnotationCreate(BaseModel):
-    doc_name:      str
-    selected_text: str
-    note:          str
-    color:         Optional[str]  = "#FCD34D"
-    is_shared:     Optional[bool] = False
-
-
-class AnnotationUpdate(BaseModel):
-    is_shared: bool
-
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
@@ -122,109 +109,6 @@ class AnnotationUpdate(BaseModel):
 async def health():
     db_ok = await db_test()
     return {"status": "ok", "db": "connected" if db_ok else "error"}
-
-
-
-# ── Annotations ──────────────────────────────────────────────────────────────
-
-@app.post("/annotations")
-async def create_annotation(
-    body:   AnnotationCreate,
-    claims: dict = Depends(verify_token),
-):
-    org_id     = claims.get("custom:org_id") or claims.get("sub")
-    user_email = claims.get("email", "dev@securestream.local")
-
-    if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id in token")
-
-    rows = await db_insert("annotations", [{
-        "org_id":        org_id,
-        "doc_name":      body.doc_name,
-        "user_email":    user_email,
-        "selected_text": body.selected_text,
-        "note":          body.note,
-        "color":         body.color,
-        "is_shared":     body.is_shared,
-    }])
-
-    if not rows:
-        raise HTTPException(status_code=500, detail="Failed to save annotation")
-    return rows[0]
-
-
-@app.get("/annotations/{doc_name}")
-async def get_annotations(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-):
-    org_id     = claims.get("custom:org_id") or claims.get("sub")
-    user_email = claims.get("email", "dev@securestream.local")
-
-    async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{BASE}/rest/v1/annotations",
-            headers=HEADERS,
-            params={
-                "org_id":   f"eq.{org_id}",
-                "doc_name": f"eq.{doc_name}",
-                "or":       f"(user_email.eq.{user_email},is_shared.eq.true)",
-                "order":    "created_at.asc",
-                "select":   "*",
-            },
-        )
-        if r.status_code != 200:
-            print(f"[ANNOTATIONS] Supabase error: {r.status_code} {r.text}")
-            return []
-        data = r.json()
-        return data if isinstance(data, list) else []
-
-
-@app.put("/annotations/{annotation_id}")
-async def update_annotation(
-    annotation_id: str,
-    body:          AnnotationCreate,
-    claims:        dict = Depends(verify_token),
-):
-    user_email = claims.get("email", "dev@securestream.local")
-
-    async with httpx.AsyncClient() as client:
-        r = await client.patch(
-            f"{BASE}/rest/v1/annotations",
-            headers={**HEADERS, "Prefer": "return=representation"},
-            params={
-                "id":         f"eq.{annotation_id}",
-                "user_email": f"eq.{user_email}",
-            },
-            json={
-                "note":          body.note,
-                "color":         body.color,
-                "selected_text": body.selected_text,
-            },
-        )
-        data = r.json()
-        if not data:
-            raise HTTPException(status_code=403, detail="Not authorized or not found")
-        return data[0]
-
-
-@app.delete("/annotations/{annotation_id}")
-async def delete_annotation(
-    annotation_id: str,
-    claims:        dict = Depends(verify_token),
-):
-    user_email = claims.get("email", "dev@securestream.local")
-
-    async with httpx.AsyncClient() as client:
-        r = await client.delete(
-            f"{BASE}/rest/v1/annotations",
-            headers=HEADERS,
-            params={
-                "id":         f"eq.{annotation_id}",
-                "user_email": f"eq.{user_email}",
-            },
-        )
-        return {"deleted": r.status_code == 204}
 
 
 # ── Ingest ───────────────────────────────────────────────────────────────────

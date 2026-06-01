@@ -4,17 +4,11 @@ import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
 import { retrieveFile } from "../utils/filestore";
 import {
-  getAnnotations,
-  createAnnotation,
-  updateAnnotation,
-  deleteAnnotation,
-  toggleShareAnnotation,
   getOrgMembers,  
   getOnlineMembers,
   pingPresence,
 } from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
-import "react-pdf/dist/Page/AnnotationLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { askQuestionStream, getDocumentText, getSharedChatHistory, saveSharedChatHistory } from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
@@ -575,17 +569,9 @@ const [sourcesHistory, setSourcesHistory] = useState(() =>
   const [highlightedPages, setHighlightedPages] = useState({});
   const [numPages, setNumPages]                 = useState(null);
   const [fetchedText, setFetchedText]           = useState("");
-  const [annotations, setAnnotations]           = useState([]);
-  const [activeAnnotation, setActiveAnnotation] = useState(null);
-  const [newNote, setNewNote]                   = useState("");
   const [selectedText, setSelectedText]         = useState("");
   const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
   const [showNotePanel, setShowNotePanel]       = useState(false);
-  const [savingNote, setSavingNote]             = useState(false);
-  const [editingId, setEditingId]               = useState(null);
-  const [editNote, setEditNote]                 = useState("");
-  const [deletingId, setDeletingId]             = useState(null);
-  const [sharingId, setSharingId]               = useState(null);
   const [members, setMembers]                   = useState([]);
   const [onlineSet, setOnlineSet]               = useState(new Set());
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
@@ -639,15 +625,6 @@ useEffect(() => {
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
 
-  useEffect(() => {
-    if (!docName || !tokenReady) return;
-    const t = setTimeout(() => {
-      getAnnotations(docName, tokenRef.current)
-        .then((d) => setAnnotations(Array.isArray(d) ? d : []))
-        .catch(()  => setAnnotations([]));
-    }, 400);
-    return () => clearTimeout(t);
-  }, [docName, tokenReady]);
 
   useEffect(() => {
     if (!isOrg) return;
@@ -677,63 +654,10 @@ useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  const sendAnnotationEvent = () => {};
-
   const handleTextSelect = () => {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
     if (sel && sel.length > 3) { setSelectedText(sel); setShowNotePanel(true); }
-  };
-
-  const handleSaveNote = async () => {
-    if (!newNote.trim() || !selectedText) return;
-    setSavingNote(true);
-    try {
-      const ann = await createAnnotation({
-        doc_name: docName, selected_text: selectedText,
-        note: newNote.trim(), color: noteColor, is_shared: false,
-      }, tokenRef.current);
-      setAnnotations((a) => [...a, ann]);
-      sendAnnotationEvent("create", ann);
-      setNewNote(""); setSelectedText(""); setShowNotePanel(false);
-    } catch (err) { console.error("Annotation error:", err); }
-    finally { setSavingNote(false); }
-  };
-
-  const handleEditNote = async (ann) => {
-    if (!editNote.trim()) return;
-    try {
-      const updated = await updateAnnotation(ann.id, {
-        doc_name: ann.doc_name, selected_text: ann.selected_text,
-        note: editNote.trim(), color: ann.color,
-      }, tokenRef.current);
-      setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, note: updated.note } : a));
-      if (activeAnnotation?.id === ann.id) setActiveAnnotation((a) => ({ ...a, note: updated.note }));
-      sendAnnotationEvent("update", { ...ann, note: updated.note });
-      setEditingId(null); setEditNote("");
-    } catch (err) { console.error("Edit error:", err); }
-  };
-
-  const handleDeleteAnnotation = async (ann) => {
-    setDeletingId(ann.id);
-    try {
-      await deleteAnnotation(ann.id, tokenRef.current);
-      setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
-      if (activeAnnotation?.id === ann.id) setActiveAnnotation(null);
-      sendAnnotationEvent("delete", { id: ann.id });
-    } catch (err) { console.error("Delete error:", err); }
-    finally { setDeletingId(null); }
-  };
-
-  const handleToggleShare = async (ann) => {
-    setSharingId(ann.id);
-    try {
-      const updated = await toggleShareAnnotation(ann.id, !ann.is_shared, tokenRef.current);
-      setAnnotations((prev) => prev.map((a) => a.id === ann.id ? { ...a, is_shared: updated.is_shared } : a));
-      if (activeAnnotation?.id === ann.id) setActiveAnnotation((a) => ({ ...a, is_shared: updated.is_shared }));
-      sendAnnotationEvent("update", { ...ann, is_shared: updated.is_shared });
-    } catch (err) { console.error("Share error:", err); }
-    finally { setSharingId(null); }
   };
 
   const handleRemoveMember = async (member) => {
@@ -845,8 +769,6 @@ useEffect(() => {
     }
   };
 
-  const safeAnnotations   = Array.isArray(annotations) ? annotations : [];
-  const myAnnotations     = safeAnnotations.filter((a) => a.user_email === userEmail);
   const displayText       = docText || fetchedText;
   const parts             = highlightText(displayText, highlights);
   const onlineCount       = onlineSet.size;
@@ -964,66 +886,6 @@ useEffect(() => {
             className="flex-1 overflow-y-auto"
             style={{ position: "relative" }}
           >
-            {activeAnnotation && (
-              <div style={{ borderLeftColor: activeAnnotation.color }}
-                className="border-l-4 mx-5 mt-4 bg-gray-50 rounded-r-xl px-4 py-3">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-400 mb-0.5">
-                      {activeAnnotation.user_email === userEmail ? "Your note"
-                        : `Note by ${activeAnnotation.user_email?.split("@")[0]}`}
-                      {activeAnnotation.is_shared && <span className="ml-2 text-blue-500">· shared with org</span>}
-                    </p>
-                    <p className="text-xs text-gray-500 italic mb-1">
-                      "{activeAnnotation.selected_text?.slice(0, 80)}{activeAnnotation.selected_text?.length > 80 ? "..." : ""}"
-                    </p>
-                    {editingId === activeAnnotation.id ? (
-                      <div className="flex gap-2 mt-1">
-                        <input type="text" value={editNote} onChange={(e) => setEditNote(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && handleEditNote(activeAnnotation)}
-                          className="flex-1 border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-[#185FA5]"
-                          autoFocus/>
-                        <button onClick={() => handleEditNote(activeAnnotation)}
-                          className="text-xs px-2 py-1 bg-[#185FA5] text-white rounded-lg">Save</button>
-                        <button onClick={() => { setEditingId(null); setEditNote(""); }}
-                          className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-lg">Cancel</button>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-gray-900">{activeAnnotation.note}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1 ml-3 flex-shrink-0">
-                    {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
-                      <button onClick={() => { setEditingId(activeAnnotation.id); setEditNote(activeAnnotation.note); }}
-                        className="text-xs text-gray-400 hover:text-gray-600 px-1.5 py-1 rounded hover:bg-gray-100">Edit</button>
-                    )}
-                    {activeAnnotation.user_email === userEmail && (
-                      <button onClick={() => handleDeleteAnnotation(activeAnnotation)}
-                        disabled={deletingId === activeAnnotation.id}
-                        className="text-xs text-red-400 hover:text-red-600 px-1.5 py-1 rounded hover:bg-red-50">
-                        {deletingId === activeAnnotation.id ? "..." : "Delete"}
-                      </button>
-                    )}
-                    <button onClick={() => setActiveAnnotation(null)}
-                      className="text-xs text-gray-400 hover:text-gray-600 px-1 py-1 rounded">✕</button>
-                  </div>
-                </div>
-                {activeAnnotation.user_email === userEmail && editingId !== activeAnnotation.id && (
-                  <button onClick={() => handleToggleShare(activeAnnotation)}
-                    disabled={sharingId === activeAnnotation.id}
-                    className={`mt-2 text-xs px-3 py-1 rounded-lg transition-colors ${
-                      activeAnnotation.is_shared
-                        ? "bg-blue-50 text-blue-600 hover:bg-blue-100"
-                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                    }`}>
-                    {sharingId === activeAnnotation.id ? "Updating..."
-                      : activeAnnotation.is_shared ? "Shared · click to make private"
-                      : "Private · click to share with org"}
-                  </button>
-                )}
-              </div>
-            )}
-
             {isPDF ? (
               <div className="flex justify-center py-4 px-4">
                 {pdfFile ? (
@@ -1101,21 +963,6 @@ useEffect(() => {
               <div className="px-8 py-6 max-w-prose mx-auto">
                 {displayText ? (
                   <>
-                    {myAnnotations.length > 0 && (
-                      <div className="flex flex-wrap gap-2 mb-6 pb-4 border-b border-gray-100">
-                        <span className="text-xs text-gray-400 w-full">Your notes:</span>
-                        {myAnnotations.map((ann) => (
-                          <button key={ann.id}
-                            onClick={() => setActiveAnnotation(activeAnnotation?.id === ann.id ? null : ann)}
-                            style={{ borderColor: ann.color }}
-                            className="text-xs border rounded-lg px-2 py-1 text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
-                            <span style={{ backgroundColor: ann.color }} className="w-2 h-2 rounded-full inline-block"/>
-                            "{ann.selected_text.slice(0, 25)}..."
-                            {ann.is_shared && <span className="text-blue-400 ml-1">shared</span>}
-                          </button>
-                        ))}
-                      </div>
-                    )}
                     <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
                       {parts.map((part, i) =>
                         part.highlight ? (
@@ -1159,17 +1006,6 @@ useEffect(() => {
                   <button key={c} onClick={() => setNoteColor(c)} style={{ backgroundColor: c }}
                     className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "border-gray-600 scale-110" : "border-transparent"}`}/>
                 ))}
-              </div>
-              <div className="flex gap-2">
-                <input type="text" value={newNote} onChange={(e) => setNewNote(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSaveNote()}
-                  placeholder="Write your note..."
-                  className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#185FA5] transition-colors"
-                  autoFocus/>
-                <button onClick={handleSaveNote} disabled={!newNote.trim() || savingNote}
-                  className={`px-4 py-2 text-xs rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}>
-                  {savingNote ? "Saving..." : "Save note"}
-                </button>
               </div>
             </div>
           )}
@@ -1334,12 +1170,8 @@ useEffect(() => {
                 </svg>
               </button>
             </div>
-            <p className="text-xs text-gray-400 text-center mt-1.5">
-              {isPDF ? "AI searches embedded content" : "Select text to annotate · Enter to ask"}
-            </p>
           </div>
         </div>
-
       </main>
     </div>
   );

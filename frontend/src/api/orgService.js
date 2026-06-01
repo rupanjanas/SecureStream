@@ -1,11 +1,5 @@
-import { getSession } from "./aiService";
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
-
-async function getToken() {
-  const session = await getSession();
-  return session?.access_token;
-}
 
 export async function createOrg(name) {
   const res = await fetch(`${AUTH_URL}/org/create`, {
@@ -20,28 +14,6 @@ export async function createOrg(name) {
 
 export async function getMyOrg() {
   const res = await fetch(`${AUTH_URL}/org/me`, { credentials: "include" });
-  return res.json();
-}
-
-export async function updateAnnotation(id, data, token) {
-  const res = await fetch(`${AI_URL}/annotations/${id}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify(data)
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function deleteAnnotation(id, token) {
-  const res = await fetch(`${AI_URL}/annotations/${id}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -90,62 +62,6 @@ export async function sendEmailInvite(email, inviteUrl) {
   return res.json();
 }
 
-export async function getAnnotations(docName) {
-  const token = await getToken();
-
-  if (!token) throw new Error("No token");
-
-  const res = await fetch(
-    `${AI_URL}/annotations/${encodeURIComponent(docName)}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    }
-  );
-
-  if (!res.ok) throw new Error(await res.text());
-
-  return res.json();
-}
-
-export async function createAnnotation(data) {
-  const token = await getToken();
-
-  if (!token) throw new Error("No token");
-
-  const res = await fetch(`${AI_URL}/annotations`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify(data)
-  });
-
-  if (!res.ok) throw new Error(await res.text());
-
-  return res.json();
-}
-
-export async function toggleShareAnnotation(id, isShared) {
-  const token = await getToken();
-
-  if (!token) throw new Error("No token");
-
-  const res = await fetch(`${AI_URL}/annotations/${id}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify({ is_shared: isShared })
-  });
-
-  if (!res.ok) throw new Error(await res.text());
-
-  return res.json();
-}
 
 export async function getMemberships() {
   const res = await fetch(`${AUTH_URL}/org/memberships`, {
