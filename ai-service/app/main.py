@@ -238,18 +238,18 @@ async def ingest(
     file:      UploadFile = File(...),
     claims:    dict       = Depends(verify_token),
     x_domain:  str        = Header(default="general"),
-    x_org_id:  str        = Header(default=""),   # ← ADD: frontend sends this
+    x_org_id:  str        = Header(default=""),
 ):
-    # Use x_org_id header if provided (org mode), else fall back to sub (personal)
-    org_id = x_org_id.strip() or claims.get("sub")
+    user_sub = claims.get("sub")
+    org_id = x_org_id.strip() or user_sub
+
     if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id in token")
+        raise HTTPException(status_code=400, detail="No org_id resolved")
 
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
 
     file_bytes = await file.read()
-
     if len(file_bytes) > MAX_FILE_MB * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB} MB limit")
 
@@ -278,6 +278,7 @@ async def query_stream(
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
+    user_sub = claims.get("sub")
     org_id = x_org_id.strip() or claims.get("sub")
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id in token")
@@ -368,15 +369,18 @@ async def list_documents(
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
-    org_id = x_org_id.strip() or claims.get("sub")
-    if not org_id:
-        raise HTTPException(status_code=403, detail="No org access")
+    user_sub = claims.get("sub")
+    org_id   = x_org_id.strip() or None
+    if org_id:
+        effective_id = org_id
+    else:
+        effective_id = user_sub
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",
             headers=HEADERS,
             params={
-                "org_id": f"eq.{org_id}",
+                "org_id": f"eq.{effective_id}",
                 "select": "doc_name,created_at,metadata,file_url",
                 "order":  "created_at.desc",
             },
@@ -397,8 +401,7 @@ async def list_documents(
                 "file_url":   d.get("file_url"),
                 "domain":     meta.get("domain", "general"),
             })
-
-    return {"documents": docs, "org_id": org_id}
+    return {"documents": docs, "org_id": effective_id}
 
 # ── NEW ROUTE: file URL ──────────────────────────────────────────────────────
 

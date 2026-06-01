@@ -47,7 +47,8 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
       setDocsLoading(true);
       setDocs([]);
       try {
-        const data = await listDocuments(accessToken, orgId);
+        const effectiveOrgId = mode === "org" ? orgId : null;
+        const data = await listDocuments(accessToken, effectiveOrgId);
         setDocs(data.documents || []);
       } catch {
         setDocs([]);
@@ -56,7 +57,7 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
       }
     };
     loadDocs();
-  }, [orgId, accessToken]);
+  }, [orgId, accessToken, mode]);
 
   const aiOnline = health?.status === "ok";
   const dbOnline = health?.db    === "connected";

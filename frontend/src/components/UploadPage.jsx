@@ -12,6 +12,7 @@ export default function UploadPage({ user, mode, orgId }) {
   const [error, setError]         = useState(null);
   const inputRef                  = useRef(null);
   const navigate                  = useNavigate();
+  const effectiveOrgId = mode === "org" ? orgId : null;
 
   const handleFile = (f) => {
     if (!f) return;
@@ -54,7 +55,7 @@ export default function UploadPage({ user, mode, orgId }) {
       const token   = session?.access_token || "dev-token";
 
       // Upload — pass orgId so ingest scopes correctly
-      const data = await uploadDocument(file, token, mode === "org" ? orgId : null);
+      const data = await uploadDocument(file, token, effectiveOrgId);
       setResult(data);
       setStatus("done");
 
