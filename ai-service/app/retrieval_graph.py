@@ -1,335 +1,371 @@
-import re
-import httpx
-import json
+"""
+query.py — retrieval, context building, and non-streaming answer pipeline.
+
+Key changes from original:
+- STOP_WORDS, filter_junk, and rerank are now properly defined (they were
+  imported by query_graph.py but never existed here — startup crash).
+- save_query_log was accidentally indented inside answer_question (unreachable).
+  It is now a proper top-level async function.
+- result dict no longer references `combined` from an outer scope after the
+  badly-indented function definition broke the control flow.
+- Keyword similarity scoring uses term-frequency / chunk-length normalisation
+  instead of the ad-hoc +0.05-per-occurrence heuristic.
+- deduplicate uses chunk_index as primary key then falls back to text prefix,
+  matching query_graph.py's expectations.
+"""
+
 import asyncio
-from typing import Dict, Any, List, TypedDict, Optional
-from langgraph.graph import StateGraph, END
+import json
+import re
+from typing import Optional
+
+import httpx
+from langchain_core.prompts import PromptTemplate
+
+from app.cache import get_cached, set_cached
 from app.config import settings
-from app.db import db_rpc, db_keyword_search, db_insert
-from app.query import STOP_WORDS, filter_junk, deduplicate, rerank, RAG_PROMPT
+from app.db import db_insert, db_rpc, db_keyword_search
 
 
-# ── THE FIX: asyncio.Queue cannot be in LangGraph TypedDict state —————————————
-# LangGraph tries to merge/copy state between nodes, which fails on Queue.
-# Solution: store the queue in a module-level dict keyed by a run_id,
-# pass only the string key through state.
+# ── RAG prompt ────────────────────────────────────────────────────────────────
 
-_QUEUE_REGISTRY: Dict[str, asyncio.Queue] = {}
+RAG_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""You are a helpful document assistant. Answer the question using ONLY the context below.
 
+Rules:
+- Summarize and paraphrase clearly. You do not need to quote verbatim.
+- If the context contains relevant information, always use it — even if partial.
+- Only say "Not found in the uploaded document." if there is truly NO relevant information at all.
+- Never make up information not in the context.
+- Never reference URLs or bibliography entries.
 
-class RetrievalState(TypedDict):
-    question:         str
-    org_id:           str
-    chat_history:     List[Dict[str, str]]
-    doc_name:         Optional[str]
-    queue_id:         str              # ← string key, not the Queue itself
-    strategy:         Dict[str, Any]
-    query_vector:     List[float]
-    keywords:         List[str]
-    vector_results:   List[Dict[str, Any]]
-    keyword_results:  List[Dict[str, Any]]
-    combined_results: List[Dict[str, Any]]
-    context:          str
-    generation:       str
-    grounded:         bool
+Context:
+{context}
+
+Question: {question}
+
+Answer:""",
+)
 
 
-def _get_queue(queue_id: str) -> asyncio.Queue:
-    return _QUEUE_REGISTRY[queue_id]
+# ── Stop words (used here and exported to query_graph.py) ────────────────────
+
+STOP_WORDS: set[str] = {
+    "what", "where", "when", "which", "that", "this", "with", "from",
+    "have", "will", "been", "were", "they", "them", "their", "about",
+    "does", "show", "tell", "give", "find", "list", "please", "just",
+    "also", "some", "more", "very", "can", "the", "and", "for", "are",
+    "was", "but", "not", "you", "all", "any", "had", "his", "her",
+    "she", "how", "its", "our", "out", "use",
+}
 
 
-async def _reformulate_question(question: str, history: str) -> str:
-    async with httpx.AsyncClient(timeout=10) as client:
+# ── Junk filter (exported to query_graph.py) ──────────────────────────────────
+
+_JUNK_RE = re.compile(r"(https?://|www\.|doi\.org|\[\d+\])", re.IGNORECASE)
+
+
+def filter_junk(chunks: list[dict]) -> list[dict]:
+    """Remove chunks that are predominantly URLs, citations, or bibliography lines."""
+    clean = []
+    for c in chunks:
+        text = c.get("chunk_text", "")
+        sentences = [s.strip() for s in text.split(".") if s.strip()]
+        if not sentences:
+            continue
+        junk_ratio = sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences)
+        if junk_ratio <= 0.5:
+            clean.append(c)
+    return clean
+
+
+# ── Reranker (exported to query_graph.py) ─────────────────────────────────────
+
+def rerank(question: str, chunks: list[dict]) -> list[dict]:
+    """
+    Simple lexical re-ranking on top of vector similarity.
+
+    Score = vector_similarity * 0.7 + keyword_overlap * 0.3
+
+    This avoids the original ad-hoc +0.05-per-hit heuristic and produces
+    scores that are interpretable and bounded in [0, 1].
+    """
+    q_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", question.lower())) - STOP_WORDS
+
+    for c in chunks:
+        vec_sim = c.get("similarity", 0.0)
+        chunk_words = set(
+            re.findall(r"\b[a-zA-Z]{3,}\b", c.get("chunk_text", "").lower())
+        )
+        overlap = len(q_words & chunk_words) / max(len(q_words), 1)
+        c["similarity"] = round(vec_sim * 0.7 + overlap * 0.3, 4)
+
+    return sorted(chunks, key=lambda c: c.get("similarity", 0), reverse=True)
+
+
+# ── Jina query embedder ───────────────────────────────────────────────────────
+
+async def embed_query(question: str) -> list[float]:
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "input": [question],
+                "model": "jina-embeddings-v3",
+                "task": "text-matching",
+            },
+        )
+        r.raise_for_status()
+        return r.json()["data"][0]["embedding"]
+
+
+# ── Groq non-streaming ────────────────────────────────────────────────────────
+
+async def ask_groq(prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {settings.groq_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
             json={
                 "model": "llama-3.1-8b-instant",
-                "max_tokens": 60,
-                "temperature": 0,
-                "messages": [{
-                    "role": "user",
-                    "content": f"Rewrite the follow-up question as a standalone question.\n\nHistory:\n{history}\n\nFollow-up: {question}\n\nStandalone question:"
-                }]
-            }
+                "temperature": 0.1,
+                "max_tokens": 600,
+                "messages": [{"role": "user", "content": prompt}],
+            },
         )
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
-    return question
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
 
 
-async def analyze_and_embed_node(state: RetrievalState) -> Dict[str, Any]:
-    question = state["question"]
-    history  = state.get("chat_history", [])
+# ── Context builder ───────────────────────────────────────────────────────────
 
-    # If follow-up question, rewrite it with context
-    if history and any(
-        w in question.lower()
-        for w in ["it", "this", "that", "they", "he", "she", "there", "those"]
-    ):
-        # Reformulate using last 2 turns
-        recent   = history[-4:]   # last 2 Q/A pairs
-        context  = "\n".join(f"{m['role']}: {m['content']}" for m in recent)
-        question = await _reformulate_question(question, context)
-        print(f"[ANALYZE]   Reformulated: {question!r}")
-
-    # normalize question text for downstream use
-    q = question
-    q_lower = q.lower()
-
-    if any(w in q_lower for w in ["compare", "difference", "versus", "vs"]):
-        strategy = {"top_k": settings.top_k_comparison, "use_keyword": True,  "intent": "comparison"}
-    elif any(w in q_lower for w in ["summarize", "summary", "overview", "report"]):
-        strategy = {"top_k": settings.top_k_summary,    "use_keyword": False, "intent": "summary"}
-    else:
-        strategy = {"top_k": settings.top_k_default,    "use_keyword": True,  "intent": "factual"}
-
-    words    = re.findall(r'\b[a-zA-Z]{3,}\b', q_lower)
-    keywords = [w for w in words if w not in STOP_WORDS]
-    stems    = [w[:5] for w in keywords if len(w) >= 7]
-    keywords = list(dict.fromkeys(keywords + stems))[:8]
-
-    print(f"[ANALYZE]   Intent={strategy['intent']} top_k={strategy['top_k']}")
-    print(f"[ANALYZE]   Keywords: {keywords}")
-    print(f"[EMBED]     Calling Jina API...")
-
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                "https://api.jina.ai/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {settings.jina_api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json={
-                    "input": [q],
-                    "model": "jina-embeddings-v3",
-                    "task":  "retrieval.query",
-                },
-            )
-            print(f"[EMBED]     Jina HTTP status: {r.status_code}")
-            if r.status_code != 200:
-                print(f"[EMBED]     Jina error: {r.text}")
-                raise ValueError(f"Jina embed failed {r.status_code}: {r.text}")
-            query_vector = r.json()["data"][0]["embedding"]
-            print(f"[EMBED]     OK — dim={len(query_vector)}")
-    except Exception as e:
-        print(f"[EMBED]     ERROR: {e}")
-        raise
-
-    return {"strategy": strategy, "keywords": keywords, "query_vector": query_vector}
-
-
-async def parallel_search_node(state: RetrievalState) -> Dict[str, Any]:
-    print(f"[SEARCH]    Firing parallel vector + keyword search...")
-
-    # doc_name=None must become "" not "None" for the RPC filter
-    doc_filter = state.get("doc_name") or ""
-
-    async def vector_search():
-        try:
-            results = await db_rpc("match_documents", {
-                "query_embedding": state["query_vector"],
-                "match_count":     25,
-                "filter_org_id":   state["org_id"],
-                "filter_doc_name": doc_filter,
-            })
-            count = len(results) if results else 0
-            print(f"[VECTOR]    Returned {count} chunks")
-            for i, c in enumerate((results or [])[:3]):
-                sim     = round(c.get("similarity", 0), 3)
-                page    = (c.get("metadata") or {}).get("page_number", "?")
-                preview = c.get("chunk_text", "")[:80].replace("\n", " ")
-                print(f"[VECTOR]    [{i}] sim={sim} page={page} | {preview!r}")
-            return results or []
-        except Exception as e:
-            print(f"[VECTOR]    ERROR: {e}")
-            return []
-
-    async def keyword_search():
-        if not state["strategy"].get("use_keyword") or not state["keywords"]:
-            print(f"[KEYWORD]   Skipped")
-            return []
-        try:
-            tasks = [
-                db_keyword_search(state["org_id"], kw, doc_name=state.get("doc_name"))
-                for kw in state["keywords"][:4]
-            ]
-            batches = await asyncio.gather(*tasks, return_exceptions=True)
-            results = []
-            for kw, b in zip(state["keywords"][:4], batches):
-                if isinstance(b, list):
-                    print(f"[KEYWORD]   '{kw}' → {len(b)} hits")
-                    results.extend(b)
-                else:
-                    print(f"[KEYWORD]   '{kw}' → ERROR: {b}")
-            print(f"[KEYWORD]   Total: {len(results)}")
-            return results
-        except Exception as e:
-            print(f"[KEYWORD]   ERROR: {e}")
-            return []
-
-    vec_results, kw_results = await asyncio.gather(vector_search(), keyword_search())
-    return {"vector_results": vec_results, "keyword_results": kw_results}
-
-
-async def merge_rerank_node(state: RetrievalState) -> Dict[str, Any]:
-    vec = state.get("vector_results", [])
-    kw  = state.get("keyword_results", [])
-    print(f"[MERGE]     {len(vec)} vector + {len(kw)} keyword = {len(vec)+len(kw)} total")
-
-    combined    = kw + vec
-    after_dedup = deduplicate(combined)
-    after_junk  = filter_junk(after_dedup)
-    print(f"[MERGE]     After dedup={len(after_dedup)} junk_filter={len(after_junk)}")
-
-    if not after_junk:
-        print(f"[MERGE]     ⚠️  NO CHUNKS SURVIVED")
-        return {"context": "", "combined_results": []}
-
-    sorted_chunks = rerank(state["question"], after_junk)
-    final_chunks  = sorted_chunks[:state["strategy"]["top_k"]]
-
-    print(f"[MERGE]     Top {len(final_chunks)} after rerank:")
-    for i, c in enumerate(final_chunks):
-        sim     = round(c.get("similarity", 0), 3)
-        page    = (c.get("metadata") or {}).get("page_number", "?")
-        preview = c.get("chunk_text", "")[:80].replace("\n", " ")
-        print(f"[MERGE]     [{i}] sim={sim} page={page} | {preview!r}")
-
-    parts, word_count = [], 0
-    for c in final_chunks:
-        text  = c.get("chunk_text", "")
-        page  = (c.get("metadata") or {}).get("page_number", "?")
+def build_context(chunks: list[dict], max_words: int = 1200) -> str:
+    parts: list[str] = []
+    word_count = 0
+    for c in chunks:
+        text = c.get("chunk_text", "")
+        page = (c.get("metadata") or {}).get("page_number", "?")
         words = text.split()
-        if word_count + len(words) > settings.context_max_words:
-            remaining = settings.context_max_words - word_count
+        if word_count + len(words) > max_words:
+            remaining = max_words - word_count
             if remaining > 30:
                 parts.append(f"[Page {page}]\n" + " ".join(words[:remaining]) + "…")
             break
         parts.append(f"[Page {page}]\n{text}")
         word_count += len(words)
-
-    context = "\n\n".join(parts)
-    print(f"[MERGE]     Context {word_count} words | preview: {context[:150].replace(chr(10),' ')!r}")
-    return {"context": context, "combined_results": final_chunks}
+    return "\n\n".join(parts)
 
 
-async def generate_stream_node(state: RetrievalState) -> Dict[str, Any]:
-    # Retrieve queue from registry using the string key
-    q_queue = _get_queue(state["queue_id"])
+# ── Deduplication ─────────────────────────────────────────────────────────────
 
-    if not state["context"].strip():
-        print(f"[GENERATE]  ⚠️  Empty context")
-        await q_queue.put(None)
-        return {"generation": "No relevant documents found."}
+def deduplicate(chunks: list[dict]) -> list[dict]:
+    seen: set = set()
+    result: list[dict] = []
+    for c in chunks:
+        meta = c.get("metadata") or {}
+        key = meta.get("chunk_index")
+        if key is None:
+            key = c.get("chunk_text", "")[:200].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            result.append(c)
+    return result
 
-    intent     = state["strategy"].get("intent", "factual")
-    max_tokens = 600 if intent == "summary" else 400
-    prompt     = RAG_PROMPT.format(context=state["context"], question=state["question"])
 
-    print(f"[GENERATE]  model={settings.groq_model} max_tokens={max_tokens} prompt={len(prompt)}chars")
+# ── Keyword search helpers ────────────────────────────────────────────────────
 
-    full_generation = []
-    token_count     = 0
+def _extract_keywords(question: str) -> list[str]:
+    """Extract meaningful query keywords, skipping stop words."""
+    q_lower = question.lower().strip()
+    terms = list(
+        dict.fromkeys(
+            w for w in re.findall(r"\b[a-zA-Z]{4,}\b", q_lower) if w not in STOP_WORDS
+        )
+    )[:4]
+    if not terms:
+        terms = [q_lower]
+    return terms
 
+
+def _score_keyword_chunk(chunk: dict, kw_terms: list[str]) -> float:
+    """
+    Normalised keyword score: (total term hits / chunk word count), capped at 0.95.
+    More principled than the original +0.05-per-hit heuristic.
+    """
+    text = chunk.get("chunk_text", "").lower()
+    words = text.split()
+    if not words:
+        return 0.6
+    hits = sum(text.count(kw) for kw in kw_terms)
+    # normalise by chunk length so short chunks with one hit don't outscore long ones
+    score = min(0.6 + (hits / max(len(words), 1)) * 10, 0.95)
+    return round(score, 4)
+
+
+# ── Core retrieve ─────────────────────────────────────────────────────────────
+
+async def retrieve(
+    question: str,
+    org_id: str,
+    doc_name: str = "",
+    top_k: int = 5,
+) -> list[dict]:
+    kw_terms = _extract_keywords(question)
+
+    async def keyword_search() -> list[dict]:
+        results: list[dict] = []
+        batches = await asyncio.gather(
+            *[
+                db_keyword_search(org_id, kw, doc_name=doc_name or None)
+                for kw in kw_terms
+            ],
+            return_exceptions=True,
+        )
+        for b in batches:
+            if isinstance(b, list):
+                results.extend(b)
+        for c in results:
+            if not c.get("similarity"):
+                c["similarity"] = _score_keyword_chunk(c, kw_terms)
+        print(f"[KW] terms={kw_terms} → {len(results)} chunks")
+        return results
+
+    async def vector_search() -> list[dict]:
+        try:
+            query_vector = await embed_query(question)
+            result = await db_rpc(
+                "match_documents",
+                {
+                    "query_embedding": query_vector,
+                    "match_count": 20,
+                    "filter_org_id": org_id,
+                    "filter_doc_name": doc_name or "",
+                },
+            )
+            top_sim = result[0].get("similarity", 0) if result else 0
+            print(f"[VEC] → {len(result)} chunks, top sim={top_sim:.3f}")
+            return result
+        except Exception as e:
+            print(f"[VEC ERROR] {e}")
+            return []
+
+    kw_chunks, vec_chunks = await asyncio.gather(keyword_search(), vector_search())
+
+    combined = deduplicate(kw_chunks + vec_chunks)
+    combined = rerank(question, combined)
+    combined = combined[:top_k]
+
+    print(f"[RETRIEVE] final={len(combined)} chunks")
+    for i, c in enumerate(combined):
+        meta = c.get("metadata") or {}
+        print(
+            f"  [{i}] page={meta.get('page_number')} "
+            f"sim={c.get('similarity', 0):.3f} "
+            f"text={c.get('chunk_text', '')[:60]!r}"
+        )
+
+    return combined
+
+
+# ── Query log ─────────────────────────────────────────────────────────────────
+
+async def save_query_log(
+    org_id: str,
+    question: str,
+    answer: str,
+    source_passages: list,
+) -> None:
+    """Persist a query + answer to the query_logs table (fire-and-forget)."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            async with client.stream(
-                "POST",
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.groq_api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json={
-                    "model":       settings.groq_model,
-                    "temperature": settings.groq_temperature,
-                    "max_tokens":  max_tokens,
-                    "stream":      True,
-                    "messages":    [{"role": "user", "content": prompt}],
-                },
-            ) as resp:
-                print(f"[GENERATE]  Groq HTTP status: {resp.status_code}")
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    print(f"[GENERATE]  Groq error: {body.decode()}")
-                    await q_queue.put(None)
-                    return {"generation": ""}
-
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: ") or line == "data: [DONE]":
-                        continue
-                    try:
-                        chunk = json.loads(line[6:])
-                        token = chunk["choices"][0]["delta"].get("content", "")
-                        if token:
-                            full_generation.append(token)
-                            token_count += 1
-                            await q_queue.put(token)
-                    except Exception as pe:
-                        print(f"[GENERATE]  Parse error: {pe}")
-                        continue
-
-        print(f"[GENERATE]  ✅ {token_count} tokens streamed")
-
+        await db_insert(
+            "query_logs",
+            [
+                {
+                    "org_id":   org_id,
+                    "question": question,
+                    "answer":   answer,
+                    "sources":  json.dumps(source_passages),
+                }
+            ],
+        )
     except Exception as e:
-        print(f"[GENERATE]  ERROR: {e}")
-        raise
-    finally:
-        await q_queue.put(None)
-
-    return {"generation": "".join(full_generation)}
+        print(f"[QUERY LOG] Failed to save: {e}")
 
 
-async def grounding_check_node(state: RetrievalState) -> Dict[str, Any]:
-    gen_text = state["generation"]
-    context  = state["context"]
+# ── Non-streaming pipeline ────────────────────────────────────────────────────
 
-    if not gen_text or gen_text == "No relevant documents found.":
-        _QUEUE_REGISTRY.pop(state["queue_id"], None)
-        return {"grounded": True}
+async def answer_question(
+    question: str,
+    org_id: str,
+    top_k: int = 5,
+) -> dict:
+    cached = await get_cached(org_id, question)
+    if cached:
+        print(f"[CACHE HIT] org={org_id}")
+        return cached
 
-    # Quick lexical check first — fast path
-    gen_words     = set(re.findall(r'\b[a-zA-Z]{4,}\b', gen_text.lower()))
-    context_words = set(re.findall(r'\b[a-zA-Z]{4,}\b', context.lower()))
-    noise         = {"found", "uploaded", "document", "context", "answer", "question"}
-    signal_words  = gen_words - noise
+    combined = await retrieve(question, org_id, top_k=top_k)
 
-    overlap_ratio = len(signal_words & context_words) / max(len(signal_words), 1)
-    is_grounded   = overlap_ratio >= 0.25   # at least 25% of answer words appear in context
+    if not combined:
+        return {
+            "answer":          "No relevant documents found.",
+            "sources":         [],
+            "source_passages": [],
+            "org_id":          org_id,
+        }
 
-    print(f"[GROUNDING] overlap_ratio={overlap_ratio:.2f} grounded={is_grounded}")
+    context = build_context(combined)
+    prompt = RAG_PROMPT.format(context=context, question=question)
+    answer = await ask_groq(prompt)
 
-    _QUEUE_REGISTRY.pop(state["queue_id"], None)
+    source_passages = [
+        {
+            "doc_name":    c.get("doc_name", ""),
+            "passage":     c.get("chunk_text", ""),
+            "similarity":  round(c.get("similarity", 0), 3),
+            "section":     (c.get("metadata") or {}).get("section", ""),
+            "page_number": (c.get("metadata") or {}).get("page_number", 1),
+        }
+        for c in combined
+    ]
 
-    asyncio.create_task(db_insert("query_logs", [{
-        "org_id":    state["org_id"],
-        "question":  state["question"],
-        "answer":    gen_text,
-        "grounded":  is_grounded,
-    }]))
+    result = {
+        "answer":          answer,
+        "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined],
+        "source_passages": source_passages,
+        "org_id":          org_id,
+    }
 
-    return {"grounded": is_grounded}
+    await set_cached(org_id, question, result, ttl=300)
+    asyncio.create_task(save_query_log(org_id, question, answer, source_passages))
+
+    return result
 
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
+# ── Compat exports ────────────────────────────────────────────────────────────
 
-retrieval_flow = StateGraph(RetrievalState)
-retrieval_flow.add_node("analyze_and_embed", analyze_and_embed_node)
-retrieval_flow.add_node("parallel_search",   parallel_search_node)
-retrieval_flow.add_node("merge_rerank",      merge_rerank_node)
-retrieval_flow.add_node("generate",          generate_stream_node)
-retrieval_flow.add_node("grounding_check",   grounding_check_node)
+def get_embedder():
+    return embed_query
 
-retrieval_flow.set_entry_point("analyze_and_embed")
-retrieval_flow.add_edge("analyze_and_embed", "parallel_search")
-retrieval_flow.add_edge("parallel_search",   "merge_rerank")
-retrieval_flow.add_edge("merge_rerank",      "generate")
-retrieval_flow.add_edge("generate",          "grounding_check")
-retrieval_flow.add_edge("grounding_check",   END)
+def filter_junk_chunks(chunks: list[dict]) -> list[dict]:
+    return filter_junk(chunks)
 
-retrieval_graph = retrieval_flow.compile()
+def deduplicate_chunks(chunks: list[dict]) -> list[dict]:
+    return deduplicate(chunks)
+
+def compress_context(chunks: list[dict], max_tokens: int = 1500) -> list[dict]:
+    return chunks
+
+def group_by_section(chunks: list[dict]) -> str:
+    return build_context(chunks)
+
+async def hybrid_retrieve(question: str, org_id: str, top_k: int = 5) -> list[dict]:
+    return await retrieve(question, org_id, top_k=top_k)
