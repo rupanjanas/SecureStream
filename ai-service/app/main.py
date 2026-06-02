@@ -6,31 +6,30 @@ import time
 import httpx
 from fastapi import (
     Depends, FastAPI, File, Header, HTTPException,
-    Request, Response, UploadFile, WebSocket, WebSocketDisconnect,
+    Request, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
-from typing import Optional
-from fastapi import Query as QQuery
+from typing import Optional, Any
 
-from app.auth import verify_token, verify_token_ws
+from app.auth import verify_token
 from app.config import settings
 from app.db import db_insert, db_test, HEADERS, BASE
 from app.ingest import ingest_document
-from app.models import IngestResponse, QueryRequest, QueryResponse
-from app.query import retrieve, build_context, RAG_PROMPT, ask_groq
+from app.models import IngestResponse, QueryRequest
+from app.query import retrieve, build_context, RAG_PROMPT
 from app.ratelimit import check_rate_limit
 
 
-# ── App ──────────────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="SecureStream AI Service", version="3.0.0")
 
 
-# ── CORS ─────────────────────────────────────────────────────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,7 +40,7 @@ app.add_middleware(
 )
 
 
-# ── Security headers ─────────────────────────────────────────────────────────
+# ── Security headers ──────────────────────────────────────────────────────────
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -56,12 +55,36 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
-class ChatHistoryBody(BaseModel):
-    doc_name:  str
-    messages:  list
-    sources:   list
 
-# ── Rate limiting (query endpoints only) ─────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
+
+class AnnotationCreate(BaseModel):
+    doc_name:      str
+    selected_text: str
+    note:          str
+    color:         Optional[str]  = "#FCD34D"
+    is_shared:     Optional[bool] = False
+
+class ChatHistoryBody(BaseModel):
+    doc_name: str
+    messages: list[Any]
+    sources:  list[Any]
+
+
+# ── Shared helper: resolve org_id ─────────────────────────────────────────────
+# Rules:
+#   • If X-Org-Id header is present and non-empty → org mode, use that value
+#   • Otherwise → personal mode, use the token's sub claim
+# This is the single source of truth used by every endpoint.
+
+def resolve_org_id(x_org_id: str, claims: dict) -> str:
+    explicit = x_org_id.strip()
+    if explicit:
+        return explicit
+    return claims.get("sub", "")
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -102,8 +125,7 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 
 
-
-# ── Health ───────────────────────────────────────────────────────────────────
+# ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -111,7 +133,105 @@ async def health():
     return {"status": "ok", "db": "connected" if db_ok else "error"}
 
 
-# ── Ingest ───────────────────────────────────────────────────────────────────
+# ── Annotations ───────────────────────────────────────────────────────────────
+
+@app.post("/annotations")
+async def create_annotation(
+    body:     AnnotationCreate,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id     = resolve_org_id(x_org_id, claims)
+    user_email = claims.get("email", "dev@securestream.local")
+
+    rows = await db_insert("annotations", [{
+        "org_id":        org_id,
+        "doc_name":      body.doc_name,
+        "user_email":    user_email,
+        "selected_text": body.selected_text,
+        "note":          body.note,
+        "color":         body.color,
+        "is_shared":     body.is_shared,
+    }])
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to save annotation")
+    return rows[0]
+
+
+@app.get("/annotations/{doc_name}")
+async def get_annotations(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id     = resolve_org_id(x_org_id, claims)
+    user_email = claims.get("email", "dev@securestream.local")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/annotations",
+            headers=HEADERS,
+            params={
+                "org_id":   f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "or":       f"(user_email.eq.{user_email},is_shared.eq.true)",
+                "order":    "created_at.asc",
+                "select":   "*",
+            },
+        )
+        if r.status_code != 200:
+            print(f"[ANNOTATIONS] Supabase error: {r.status_code} {r.text}")
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
+
+
+@app.put("/annotations/{annotation_id}")
+async def update_annotation(
+    annotation_id: str,
+    body:          AnnotationCreate,
+    claims:        dict = Depends(verify_token),
+):
+    user_email = claims.get("email", "dev@securestream.local")
+    async with httpx.AsyncClient() as client:
+        r = await client.patch(
+            f"{BASE}/rest/v1/annotations",
+            headers={**HEADERS, "Prefer": "return=representation"},
+            params={
+                "id":         f"eq.{annotation_id}",
+                "user_email": f"eq.{user_email}",
+            },
+            json={
+                "note":          body.note,
+                "color":         body.color,
+                "selected_text": body.selected_text,
+            },
+        )
+        data = r.json()
+        if not data:
+            raise HTTPException(status_code=403, detail="Not authorized or not found")
+        return data[0]
+
+
+@app.delete("/annotations/{annotation_id}")
+async def delete_annotation(
+    annotation_id: str,
+    claims:        dict = Depends(verify_token),
+):
+    user_email = claims.get("email", "dev@securestream.local")
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(
+            f"{BASE}/rest/v1/annotations",
+            headers=HEADERS,
+            params={
+                "id":         f"eq.{annotation_id}",
+                "user_email": f"eq.{user_email}",
+            },
+        )
+        return {"deleted": r.status_code == 204}
+
+
+# ── Ingest ────────────────────────────────────────────────────────────────────
 
 ALLOWED_MIME = {"application/pdf", "text/plain"}
 MAX_FILE_MB  = 10
@@ -119,14 +239,12 @@ MAX_FILE_MB  = 10
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
-    file:      UploadFile = File(...),
-    claims:    dict       = Depends(verify_token),
-    x_domain:  str        = Header(default="general"),
-    x_org_id:  str        = Header(default=""),
+    file:     UploadFile = File(...),
+    claims:   dict       = Depends(verify_token),
+    x_domain: str        = Header(default="general"),
+    x_org_id: str        = Header(default=""),
 ):
-    user_sub = claims.get("sub")
-    org_id = x_org_id.strip() or user_sub
-
+    org_id = resolve_org_id(x_org_id, claims)
     if not org_id:
         raise HTTPException(status_code=400, detail="No org_id resolved")
 
@@ -141,10 +259,9 @@ async def ingest(
     return await ingest_document(file_bytes, safe_filename, org_id, domain=x_domain)
 
 
-# ── Streaming query ──────────────────────────────────────────────────────────
+# ── Query log helper ──────────────────────────────────────────────────────────
 
 async def _save_query_log(org_id, question, answer, sources):
-    """Fire-and-forget: persist the Q&A exchange to Supabase."""
     try:
         await db_insert("query_logs", [{
             "org_id":   org_id,
@@ -156,16 +273,17 @@ async def _save_query_log(org_id, question, answer, sources):
         print(f"[QUERY LOG] Failed to save: {e}")
 
 
+# ── Streaming query ───────────────────────────────────────────────────────────
+
 @app.post("/query/stream")
 async def query_stream(
     body:     QueryRequest,
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
-    user_sub = claims.get("sub")
-    org_id = x_org_id.strip() or claims.get("sub")
+    org_id = resolve_org_id(x_org_id, claims)
     if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id in token")
+        raise HTTPException(status_code=400, detail="No org_id resolved")
 
     print(f"[SSE] question={body.question!r} org={org_id} doc={body.doc_name!r}")
 
@@ -195,7 +313,6 @@ async def query_stream(
         }
         for c in combined
     ]
-
     unique_sources = list({c["doc_name"] for c in combined})
 
     async def stream_groq():
@@ -210,9 +327,9 @@ async def query_stream(
                         "Content-Type":  "application/json",
                     },
                     json={
-                        "model":    "llama3-70b-8192",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "stream":   True,
+                        "model":      "llama3-70b-8192",
+                        "messages":   [{"role": "user", "content": prompt}],
+                        "stream":     True,
                         "max_tokens": 1024,
                     },
                 ) as resp:
@@ -227,14 +344,10 @@ async def query_stream(
                                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
                         except Exception:
                             continue
-
         except Exception as e:
             yield f"data: {json.dumps({'token': f'Error: {str(e)}', 'done': False})}\n\n"
 
-        # Final frame with sources
         yield f"data: {json.dumps({'done': True, 'sources': unique_sources, 'source_passages': source_passages})}\n\n"
-
-        # Persist async — don't block the stream
         asyncio.create_task(
             _save_query_log(org_id, body.question, "".join(full_answer), source_passages)
         )
@@ -246,25 +359,21 @@ async def query_stream(
     )
 
 
-# ── Documents list ───────────────────────────────────────────────────────────
+# ── Documents list ────────────────────────────────────────────────────────────
 
 @app.get("/documents")
 async def list_documents(
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
-    user_sub = claims.get("sub")
-    org_id   = x_org_id.strip() or None
-    if org_id:
-        effective_id = org_id
-    else:
-        effective_id = user_sub
+    org_id = resolve_org_id(x_org_id, claims)
+
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",
             headers=HEADERS,
             params={
-                "org_id": f"eq.{effective_id}",
+                "org_id": f"eq.{org_id}",
                 "select": "doc_name,created_at,metadata,file_url",
                 "order":  "created_at.desc",
             },
@@ -285,38 +394,68 @@ async def list_documents(
                 "file_url":   d.get("file_url"),
                 "domain":     meta.get("domain", "general"),
             })
-    return {"documents": docs, "org_id": effective_id}
+    return {"documents": docs, "org_id": org_id}
 
-# ── NEW ROUTE: file URL ──────────────────────────────────────────────────────
+
+# ── File URL ──────────────────────────────────────────────────────────────────
 
 @app.get("/documents/file-url")
 async def get_document_file_url(
     doc_name: str,
-    claims: dict = Depends(verify_token),
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
 ):
-    org_id = claims.get("custom:org_id") or claims.get("sub")
+    org_id = resolve_org_id(x_org_id, claims)
 
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{BASE}/rest/v1/documents",
             headers=HEADERS,
             params={
-                "org_id": f"eq.{org_id}",
+                "org_id":   f"eq.{org_id}",
                 "doc_name": f"eq.{doc_name}",
-                "select": "file_url",
-                "limit": 1,
+                "select":   "file_url",
+                "limit":    "1",
             },
         )
-
         rows = r.json()
 
     if not rows or not rows[0].get("file_url"):
-        raise HTTPException(
-            status_code=404,
-            detail="file_url not found for this document",
-        )
-
+        raise HTTPException(status_code=404, detail="file_url not found for this document")
     return {"file_url": rows[0]["file_url"]}
+
+
+# ── Document text ─────────────────────────────────────────────────────────────
+
+@app.get("/documents/{doc_name}/text")
+async def get_document_text(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = resolve_org_id(x_org_id, claims)
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{BASE}/rest/v1/documents",
+            headers=HEADERS,
+            params={
+                "org_id":   f"eq.{org_id}",
+                "doc_name": f"eq.{doc_name}",
+                "select":   "chunk_text,metadata",
+            },
+        )
+        chunks = r.json()
+
+    chunks_sorted = sorted(
+        chunks,
+        key=lambda x: (x.get("metadata") or {}).get("chunk_index", 0),
+    )
+    full_text = " ".join(c.get("chunk_text", "") for c in chunks_sorted)
+    return {"doc_name": doc_name, "text": full_text, "chunk_count": len(chunks_sorted)}
+
+
+# ── Chat history ──────────────────────────────────────────────────────────────
 
 @app.get("/chat-history/{doc_name}")
 async def get_chat_history(
@@ -324,7 +463,7 @@ async def get_chat_history(
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
-    org_id = x_org_id.strip() or claims.get("custom:org_id") or claims.get("sub")
+    org_id = resolve_org_id(x_org_id, claims)
 
     async with httpx.AsyncClient() as client:
         r = await client.get(
@@ -353,7 +492,7 @@ async def save_chat_history(
     claims:   dict = Depends(verify_token),
     x_org_id: str  = Header(default=""),
 ):
-    org_id = x_org_id.strip() or claims.get("custom:org_id") or claims.get("sub")
+    org_id = resolve_org_id(x_org_id, claims)
 
     async with httpx.AsyncClient() as client:
         r = await client.post(
@@ -370,34 +509,11 @@ async def save_chat_history(
                 "updated_at": "now()",
             },
         )
+        print(f"[CHAT-HISTORY] status={r.status_code} body={r.text[:300]}")
         if r.status_code not in (200, 201):
-            raise HTTPException(status_code=500, detail="Failed to save chat history")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase error {r.status_code}: {r.text}"
+            )
         data = r.json()
         return data[0] if isinstance(data, list) else data
-# ── Full document text ───────────────────────────────────────────────────────
-
-@app.get("/documents/{doc_name}/text")
-async def get_document_text(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-):
-    org_id = claims.get("custom:org_id") or claims.get("sub")
-
-    async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{BASE}/rest/v1/documents",
-            headers=HEADERS,
-            params={
-                "org_id":   f"eq.{org_id}",
-                "doc_name": f"eq.{doc_name}",
-                "select":   "chunk_text,metadata",
-            },
-        )
-        chunks = r.json()
-
-    chunks_sorted = sorted(
-        chunks,
-        key=lambda x: (x.get("metadata") or {}).get("chunk_index", 0),
-    )
-    full_text = " ".join(c.get("chunk_text", "") for c in chunks_sorted)
-    return {"doc_name": doc_name, "text": full_text, "chunk_count": len(chunks_sorted)}
