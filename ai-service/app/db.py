@@ -10,18 +10,19 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+_LIMITS  = httpx.Limits(max_connections=50, max_keepalive_connections=20)
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 HEADERS: dict[str, str] = {
-    "apikey": settings.supabase_service_key,
+    "apikey":        settings.supabase_service_key,
     "Authorization": f"Bearer {settings.supabase_service_key}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation",
+    "Content-Type":  "application/json",
+    "Prefer":        "return=representation",
 }
 
 BASE: str = settings.supabase_url
 
+# Strip PostgREST ilike metacharacters from user-supplied keywords
 _UNSAFE_ILIKE_RE = re.compile(r"[*%?\\]")
 
 _http: Optional[httpx.AsyncClient] = None
@@ -63,6 +64,11 @@ async def db_insert(table: str, rows: list[dict]) -> list[dict]:
 
 
 async def db_upsert(table: str, rows: list[dict], on_conflict: str) -> list[dict]:
+    """
+    Idempotent insert using PostgREST on-conflict merge.
+    on_conflict: comma-separated columns that form the unique key.
+    Requires a UNIQUE constraint on those columns in Supabase.
+    """
     if not rows:
         return []
     headers = _merge_headers({"Prefer": "resolution=merge-duplicates,return=representation"})
@@ -78,7 +84,11 @@ async def db_upsert(table: str, rows: list[dict], on_conflict: str) -> list[dict
     return r.json()
 
 
-async def db_get(table: str, params: dict[str, str], extra_headers: dict | None = None) -> list[dict]:
+async def db_get(
+    table: str,
+    params: dict[str, str],
+    extra_headers: Optional[dict] = None,
+) -> list[dict]:
     headers = _merge_headers(extra_headers) if extra_headers else HEADERS
     r = await get_http().get(f"{BASE}/rest/v1/{table}", headers=headers, params=params)
     if r.status_code != 200:
@@ -116,18 +126,23 @@ async def db_test() -> dict:
         return {"ok": False, "status_code": 0, "error": str(exc)}
 
 
-async def db_keyword_search(org_id: str, keyword: str, doc_name: str | None = None) -> list[dict]:
+async def db_keyword_search(
+    org_id:   str,
+    keyword:  str,
+    doc_name: str | None = None,
+) -> list[dict]:
     safe_kw = _sanitize_ilike(keyword.strip())
     if not safe_kw:
         return []
     params: dict[str, str] = {
-        "org_id": f"eq.{org_id}",
+        "org_id":     f"eq.{org_id}",
         "chunk_text": f"ilike.*{safe_kw}*",
-        "select": "id,doc_name,chunk_text,metadata",
-        "limit": "10",
+        "select":     "id,doc_name,chunk_text,metadata",
+        "limit":      "10",
     }
     if doc_name:
         params["doc_name"] = f"eq.{doc_name}"
+
     r = await get_http().get(f"{BASE}/rest/v1/documents", headers=HEADERS, params=params)
     logger.debug("KW search '%s' → status=%d len=%d", safe_kw, r.status_code, len(r.text))
     if r.status_code != 200 or not r.text.strip():
@@ -139,7 +154,11 @@ async def db_keyword_search(org_id: str, keyword: str, doc_name: str | None = No
         return []
 
 
-async def db_patch(table: str, filters: dict[str, Any], data: dict[str, Any]) -> list[dict]:
+async def db_patch(
+    table:   str,
+    filters: dict[str, Any],
+    data:    dict[str, Any],
+) -> list[dict]:
     params = {k: f"eq.{str(v)}" for k, v in filters.items()}
     r = await get_http().patch(
         f"{BASE}/rest/v1/{table}",

@@ -1,14 +1,3 @@
-"""
-models.py — Pydantic request/response models.
-
-Changes:
-1.  IngestResponse.file_url is Optional[str] = None (unchanged — already correct).
-2.  QueryRequest.question validated for minimum length to reject blank queries.
-3.  QueryRequest.top_k capped at 20 to prevent runaway DB calls.
-4.  QueryRequest.doc_name normalised (stripped) via validator.
-5.  QueryResponse.grounded field added so the frontend can show a confidence indicator.
-"""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -17,17 +6,17 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class IngestResponse(BaseModel):
-    message: str
+    message:       str
     chunks_stored: int
-    doc_name: str
-    file_url: Optional[str] = None
+    doc_name:      str
+    file_url:      Optional[str] = None
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=20)
-    doc_name: Optional[str] = None
-    chat_history: list[dict] = Field(default_factory=list)
+    question:    str            = Field(..., min_length=1, max_length=2000)
+    top_k:       int            = Field(default=5, ge=1, le=20)
+    doc_name:    Optional[str]  = None
+    chat_history: list[dict]   = Field(default_factory=list)
 
     @field_validator("question")
     @classmethod
@@ -42,14 +31,14 @@ class QueryRequest(BaseModel):
     def strip_doc_name(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
             v = v.strip()
-            return v if v else None
+            return v or None
         return None
 
 
 class QueryResponse(BaseModel):
-    answer: str
-    sources: list[str]
-    org_id: str
+    answer:          str
+    sources:         list[str]
+    org_id:          str
     source_passages: list[dict] = Field(default_factory=list)
-    chat_history: list[dict] = Field(default_factory=list)
-    grounded: bool = True
+    chat_history:    list[dict] = Field(default_factory=list)
+    grounded:        bool       = True

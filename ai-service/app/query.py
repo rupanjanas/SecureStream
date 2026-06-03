@@ -443,9 +443,10 @@ from app.db import db_insert, db_keyword_search, db_rpc
 
 logger = logging.getLogger(__name__)
 
-# Plain string — no langchain_core dependency needed
+# Plain string template — no langchain_core dependency
 RAG_PROMPT = (
-    "You are a helpful document assistant. Answer the question using ONLY the context below.\n\n"
+    "You are a helpful document assistant. "
+    "Answer the question using ONLY the context below.\n\n"
     "Rules:\n"
     "- Summarize and paraphrase clearly. You do not need to quote verbatim.\n"
     "- If the context contains relevant information, always use it — even if partial.\n"
@@ -470,9 +471,12 @@ _JUNK_RE = re.compile(r"(https?://|www\.|doi\.org|\[\d+\])", re.IGNORECASE)
 def filter_junk(chunks: list[dict]) -> list[dict]:
     clean = []
     for c in chunks:
-        text = c.get("chunk_text", "")
+        text      = c.get("chunk_text", "")
         sentences = [s.strip() for s in text.split(".") if s.strip()]
         if not sentences:
+            continue
+        if len(sentences) <= 1:
+            clean.append(c)   # single sentence / heading — keep
             continue
         if sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences) <= 0.5:
             clean.append(c)
@@ -480,24 +484,57 @@ def filter_junk(chunks: list[dict]) -> list[dict]:
 
 
 def rerank(question: str, chunks: list[dict]) -> list[dict]:
+    """
+    Score = vector_similarity * 0.7 + keyword_overlap * 0.3.
+    Operates on copies — does NOT mutate the caller's list.
+    """
     q_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", question.lower())) - STOP_WORDS
-    result = []
+    result  = []
     for c in chunks:
-        copy = dict(c)
-        vec_sim = copy.get("similarity", 0.0)
+        copy        = dict(c)
+        vec_sim     = copy.get("similarity", 0.0)
         chunk_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", copy.get("chunk_text", "").lower()))
-        overlap = len(q_words & chunk_words) / max(len(q_words), 1)
+        overlap     = len(q_words & chunk_words) / max(len(q_words), 1)
         copy["similarity"] = round(vec_sim * 0.7 + overlap * 0.3, 4)
         result.append(copy)
     return sorted(result, key=lambda c: c.get("similarity", 0), reverse=True)
+
+
+def deduplicate(chunks: list[dict]) -> list[dict]:
+    """
+    Dedup key = (doc_name, chunk_index) so chunks from different documents
+    with the same chunk_index are NOT collapsed.
+    Falls back to text prefix when chunk_index is absent.
+    When two chunks share a key, the one with higher similarity is kept.
+    """
+    seen: dict[Any, dict] = {}
+    for c in chunks:
+        meta        = c.get("metadata") or {}
+        chunk_index = meta.get("chunk_index")
+        doc_name    = meta.get("doc_name") or c.get("doc_name", "")
+        if chunk_index is not None:
+            key: Any = ("idx", doc_name, int(chunk_index))
+        else:
+            key = ("txt", c.get("chunk_text", "")[:200].lower().strip())
+
+        if key not in seen or c.get("similarity", 0) > seen[key].get("similarity", 0):
+            seen[key] = c
+    return list(seen.values())
 
 
 async def embed_query(question: str) -> list[float]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         r = await client.post(
             "https://api.jina.ai/v1/embeddings",
-            headers={"Authorization": f"Bearer {settings.jina_api_key}", "Content-Type": "application/json"},
-            json={"input": [question], "model": "jina-embeddings-v3", "task": "retrieval.query"},
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "input": [question],
+                "model": "jina-embeddings-v3",
+                "task":  "retrieval.query",
+            },
         )
         r.raise_for_status()
         return r.json()["data"][0]["embedding"]
@@ -507,12 +544,15 @@ async def ask_groq(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {settings.groq_api_key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type":  "application/json",
+            },
             json={
-                "model": settings.groq_model,
+                "model":       settings.groq_model,
                 "temperature": settings.groq_temperature,
-                "max_tokens": settings.groq_max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens":  settings.groq_max_tokens,
+                "messages":    [{"role": "user", "content": prompt}],
             },
         )
         r.raise_for_status()
@@ -522,11 +562,11 @@ async def ask_groq(prompt: str) -> str:
 def build_context(chunks: list[dict], max_words: int = 1200) -> str:
     if not chunks:
         return ""
-    parts: list[str] = []
-    word_count = 0
+    parts:      list[str] = []
+    word_count: int       = 0
     for c in chunks:
-        text = c.get("chunk_text", "")
-        page = (c.get("metadata") or {}).get("page_number", "?")
+        text  = c.get("chunk_text", "")
+        page  = (c.get("metadata") or {}).get("page_number", "?")
         words = text.split()
         if word_count + len(words) > max_words:
             remaining = max_words - word_count
@@ -538,38 +578,28 @@ def build_context(chunks: list[dict], max_words: int = 1200) -> str:
     return "\n\n".join(parts)
 
 
-def deduplicate(chunks: list[dict]) -> list[dict]:
-    seen: dict = {}
-    for c in chunks:
-        meta = c.get("metadata") or {}
-        key = meta.get("chunk_index")
-        dedup_key: Any = ("idx", int(key)) if key is not None else ("txt", c.get("chunk_text", "")[:200].lower().strip())
-        if dedup_key not in seen or c.get("similarity", 0) > seen[dedup_key].get("similarity", 0):
-            seen[dedup_key] = c
-    return list(seen.values())
-
-
 def _extract_keywords(question: str) -> list[str]:
     terms = list(dict.fromkeys(
-        w for w in re.findall(r"\b[a-zA-Z]{4,}\b", question.lower()) if w not in STOP_WORDS
+        w for w in re.findall(r"\b[a-zA-Z]{4,}\b", question.lower())
+        if w not in STOP_WORDS
     ))[:4]
     return terms if terms else [question.lower().strip()]
 
 
 def _score_keyword_chunk(chunk: dict, kw_terms: list[str]) -> float:
-    text = chunk.get("chunk_text", "").lower()
+    text  = chunk.get("chunk_text", "").lower()
     words = text.split()
     if not words:
         return 0.6
-    hits = sum(text.count(kw) for kw in kw_terms)
+    hits  = sum(text.count(kw) for kw in kw_terms)
     return round(min(0.6 + (hits / max(len(words), 1)) * 10, 0.95), 4)
 
 
 async def retrieve(
     question: str,
-    org_id: str,
+    org_id:   str,
     doc_name: str = "",
-    top_k: int = 5,
+    top_k:    int = 5,
 ) -> list[dict]:
     kw_terms = _extract_keywords(question)
 
@@ -585,23 +615,20 @@ async def retrieve(
         for c in results:
             if not c.get("similarity"):
                 c["similarity"] = _score_keyword_chunk(c, kw_terms)
-        logger.debug("KW search terms=%s → %d chunks", kw_terms, len(results))
+        logger.debug("KW terms=%s → %d chunks", kw_terms, len(results))
         return results
 
     async def vector_search() -> list[dict]:
         try:
             query_vector = await embed_query(question)
-            result = await db_rpc(
-                "match_documents",
-                {
-                    "query_embedding": query_vector,
-                    "match_count": 20,
-                    "filter_org_id": org_id,
-                    "filter_doc_name": doc_name or "",
-                },
-            )
+            result = await db_rpc("match_documents", {
+                "query_embedding": query_vector,
+                "match_count":     20,
+                "filter_org_id":   org_id,
+                "filter_doc_name": doc_name or "",
+            })
             top_sim = result[0].get("similarity", 0) if result else 0
-            logger.debug("Vector search → %d chunks, top sim=%.3f", len(result), top_sim)
+            logger.debug("Vector → %d chunks, top sim=%.3f", len(result), top_sim)
             return result
         except Exception:
             logger.exception("Vector search error")
@@ -616,58 +643,74 @@ async def retrieve(
     return combined
 
 
-async def save_query_log(org_id: str, question: str, answer: str, source_passages: list) -> None:
+async def save_query_log(
+    org_id:          str,
+    question:        str,
+    answer:          str,
+    source_passages: list,
+) -> None:
     try:
         await db_insert("query_logs", [{
-            "org_id": org_id,
+            "org_id":   org_id,
             "question": question,
-            "answer": answer,
-            "sources": json.dumps(source_passages),
+            "answer":   answer,
+            "sources":  json.dumps(source_passages),
         }])
     except Exception:
         logger.exception("Failed to save query log")
 
 
-async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
+async def answer_question(
+    question: str,
+    org_id:   str,
+    top_k:    int = 5,
+) -> dict:
+    # Layer 1: exact cache
     cached = await get_cached(org_id, question)
     if cached:
         logger.info("Exact cache HIT org=%s", org_id)
         return cached
 
+    # Embed query once — reused for semantic cache lookup AND storage
     query_vector: Optional[list[float]] = None
     try:
         query_vector = await embed_query(question)
-        sem_cached = await get_semantic_cache(org_id, query_vector)
+        sem_cached   = await get_semantic_cache(org_id, query_vector)
         if sem_cached:
             logger.info("Semantic cache HIT org=%s", org_id)
             return sem_cached
     except Exception:
-        logger.exception("Cache lookup error — proceeding without cache")
+        logger.exception("Cache lookup failed — proceeding without cache")
 
     combined = await retrieve(question, org_id, top_k=top_k)
     if not combined:
-        return {"answer": "No relevant documents found.", "sources": [], "source_passages": [], "org_id": org_id}
+        return {
+            "answer":          "No relevant documents found.",
+            "sources":         [],
+            "source_passages": [],
+            "org_id":          org_id,
+        }
 
     context = build_context(combined)
-    prompt = RAG_PROMPT.format(context=context, question=question)
-    answer = await ask_groq(prompt)
+    prompt  = RAG_PROMPT.format(context=context, question=question)
+    answer  = await ask_groq(prompt)
 
     source_passages = [
         {
-            "doc_name": c.get("doc_name", ""),
-            "passage": c.get("chunk_text", ""),
-            "similarity": round(c.get("similarity", 0), 3),
-            "section": (c.get("metadata") or {}).get("section", ""),
+            "doc_name":    c.get("doc_name", ""),
+            "passage":     c.get("chunk_text", ""),
+            "similarity":  round(c.get("similarity", 0), 3),
+            "section":     (c.get("metadata") or {}).get("section", ""),
             "page_number": (c.get("metadata") or {}).get("page_number", 1),
         }
         for c in combined
     ]
 
     result = {
-        "answer": answer,
-        "sources": [c.get("chunk_text", "")[:200] + "..." for c in combined],
+        "answer":          answer,
+        "sources":         [c.get("chunk_text", "")[:200] + "..." for c in combined],
         "source_passages": source_passages,
-        "org_id": org_id,
+        "org_id":          org_id,
     }
 
     await set_cached(org_id, question, result, ttl=300)
@@ -677,9 +720,10 @@ async def answer_question(question: str, org_id: str, top_k: int = 5) -> dict:
     return result
 
 
-def get_embedder(): return embed_query
-def filter_junk_chunks(chunks): return filter_junk(chunks)
-def deduplicate_chunks(chunks): return deduplicate(chunks)
-def compress_context(chunks, max_tokens=1500): return chunks
-def group_by_section(chunks): return build_context(chunks)
-async def hybrid_retrieve(question, org_id, top_k=5): return await retrieve(question, org_id, top_k=top_k)
+# ── Compat shims (keep existing call-sites working) ───────────────────────────
+def get_embedder():                                    return embed_query
+def filter_junk_chunks(chunks: list) -> list:         return filter_junk(chunks)
+def deduplicate_chunks(chunks: list) -> list:         return deduplicate(chunks)
+def compress_context(chunks: list, max_tokens=1500):  return chunks
+def group_by_section(chunks: list) -> str:            return build_context(chunks)
+async def hybrid_retrieve(q, org, top_k=5):           return await retrieve(q, org, top_k=top_k)

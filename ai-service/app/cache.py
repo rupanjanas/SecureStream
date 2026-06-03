@@ -30,6 +30,9 @@ def get_redis() -> redis.Redis:
     return _redis
 
 
+# ── Layer 1: exact cache ──────────────────────────────────────────────────────
+# Key includes org_id so invalidate_org can use scan_iter with an org-scoped pattern.
+
 def _exact_key(org_id: str, question: str) -> str:
     h = hashlib.md5(question.lower().strip().encode()).hexdigest()
     return f"query:exact:{org_id}:{h}"
@@ -53,6 +56,8 @@ async def set_cached(org_id: str, question: str, result: dict, ttl: int = 300) -
     except Exception:
         logger.exception("Exact cache SET error")
 
+
+# ── Layer 2: semantic cache ───────────────────────────────────────────────────
 
 _VEC_KEY_PREFIX = "query:sem"
 
@@ -107,14 +112,15 @@ async def get_semantic_cache(
             if raw is None:
                 continue
             data = json.loads(raw)
-            sim = _cosine(query_vec, data.get("vec", []))
+            sim  = _cosine(query_vec, data.get("vec", []))
             if sim > best_sim:
-                best_sim = sim
-                best_result = data.get("result")
+                best_sim      = sim
+                best_result   = data.get("result")
                 best_entry_key = entry["key"]
 
         if best_sim >= threshold and best_result is not None:
             logger.info("Semantic cache HIT sim=%.4f org=%s", best_sim, org_id)
+            # Refresh TTL on hit
             if best_entry_key:
                 await r.expire(_sem_entry_key(org_id, best_entry_key), ttl)
             return best_result
@@ -134,13 +140,13 @@ async def set_semantic_cache(
     if not query_vec:
         return
     try:
-        r = get_redis()
+        r         = get_redis()
         entry_key = _uuid.uuid4().hex
-        payload = json.dumps({"vec": query_vec, "result": result})
+        payload   = json.dumps({"vec": query_vec, "result": result})
+        # Store entry first — safe even if index update races
         await r.setex(_sem_entry_key(org_id, entry_key), ttl, payload)
 
         index_key = _sem_index_key(org_id)
-
         for attempt in range(2):
             try:
                 async with r.pipeline(transaction=True) as pipe:
@@ -148,6 +154,7 @@ async def set_semantic_cache(
                     index_raw = await pipe.get(index_key)
                     index: list[dict] = json.loads(index_raw) if index_raw else []
 
+                    # Prune entries whose keys have expired
                     if index:
                         exists_pipe = r.pipeline()
                         for e in index:
@@ -160,23 +167,23 @@ async def set_semantic_cache(
                     pipe.setex(index_key, ttl + 60, json.dumps(index))
                     await pipe.execute()
                     return
-
             except redis.WatchError:
                 if attempt == 0:
                     logger.warning("Semantic cache WatchError — retrying")
                     continue
-                # Both attempts failed — clean up the orphan payload
+                # Both attempts failed — clean up orphan entry
                 await r.delete(_sem_entry_key(org_id, entry_key))
                 logger.error("Semantic cache WatchError on retry — orphan cleaned")
-
     except Exception:
         logger.exception("Semantic cache SET error")
 
 
 async def invalidate_org(org_id: str) -> None:
+    """Flush all exact + semantic cache entries for one org."""
     try:
         r = get_redis()
 
+        # Exact cache keys are org-scoped: query:exact:{org_id}:{hash}
         exact_keys: list[str] = []
         async for key in r.scan_iter(match=f"query:exact:{org_id}:*", count=200):
             exact_keys.append(key)
@@ -184,15 +191,15 @@ async def invalidate_org(org_id: str) -> None:
             await r.delete(*exact_keys)
             logger.info("Invalidated %d exact-cache keys org=%s", len(exact_keys), org_id)
 
+        # Semantic index + entries
         sem_index_key = _sem_index_key(org_id)
-        index_raw = await r.get(sem_index_key)
+        index_raw     = await r.get(sem_index_key)
         if index_raw:
-            index: list[dict] = json.loads(index_raw)
+            index      = json.loads(index_raw)
             entry_keys = [_sem_entry_key(org_id, e["key"]) for e in index]
             if entry_keys:
                 await r.delete(*entry_keys)
             await r.delete(sem_index_key)
             logger.info("Invalidated %d semantic entries org=%s", len(entry_keys), org_id)
-
     except Exception:
         logger.exception("Cache invalidation error org=%s", org_id)
