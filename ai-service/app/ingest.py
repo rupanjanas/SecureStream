@@ -240,6 +240,8 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
 
     return f"{settings.supabase_url}/storage/v1/object/public/documents/{unique_name}" """
     
+from __future__ import annotations
+
 """
 ingest.py — document ingestion: extract → chunk → embed → store.
 
@@ -251,15 +253,13 @@ Production fixes applied:
     huge documents (configurable via settings.max_ingest_pages / max_ingest_words).
 4.  upload_to_storage: single retry on transient failure.
 5.  process_and_chunk_document: page-assignment loop verified correct —
-    walks all mappings and keeps last one whose start ≤ pos, then breaks on
+    walks all mappings and keeps last one whose start <= pos, then breaks on
     first mapping whose start > pos (sorted ascending); logic is sound.
 6.  clean_document_text: improved regex order to avoid double-spacing.
 7.  Structured logging throughout; no bare print() in hot paths.
 8.  _splitter instantiation is deferred to first use (lazy singleton) to avoid
     import-time model download blocking startup.
 """
-
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -400,7 +400,10 @@ async def upload_to_storage(
             if r.status_code in (200, 201):
                 logger.info("Storage upload OK → %s", url)
                 return url
-            logger.warning("Storage upload HTTP %d attempt %d: %s", r.status_code, attempt + 1, r.text[:200])
+            logger.warning(
+                "Storage upload HTTP %d attempt %d: %s",
+                r.status_code, attempt + 1, r.text[:200],
+            )
         except Exception:
             logger.exception("Storage upload exception attempt %d", attempt + 1)
         if attempt == 0:
@@ -420,10 +423,10 @@ def fingerprint(text: str) -> str:
 
 
 def clean_document_text(text: str) -> str:
-    text = re.sub(r"-\s*\n\s*", "", text)                 # dehyphenate line breaks first
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)      # fix PDF word-boundary loss
+    text = re.sub(r"-\s*\n\s*", "", text)                  # dehyphenate line breaks first
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)       # fix PDF word-boundary loss
     text = re.sub(r"([.!?,:;])([A-Za-z])", r"\1 \2", text)
-    text = re.sub(r"\s+", " ", text)                       # collapse whitespace last
+    text = re.sub(r"\s+", " ", text)                        # collapse whitespace last
     return text.strip()
 
 
@@ -454,7 +457,7 @@ async def process_and_chunk_document(
 
     Page-assignment algorithm:
       Walk page_offsets in ascending order; keep the last mapping whose
-      start ≤ chunk position.  The `break` after `mapping["start"] > pos`
+      start <= chunk position.  The `break` after `mapping["start"] > pos`
       is safe because offsets are sorted ascending — no need to look further.
     """
     segments: list[str] = []
@@ -496,7 +499,9 @@ async def process_and_chunk_document(
         nodes = splitter.get_nodes_from_documents([Document(text=full_text)])
         chunks_text = [n.text for n in nodes if n.text.strip()]
     except Exception:
-        logger.exception("%s: Semantic splitter failed — falling back to paragraph split", filename)
+        logger.exception(
+            "%s: Semantic splitter failed — falling back to paragraph split", filename
+        )
         chunks_text = [p.strip() for p in re.split(r"\n{2,}", full_text) if p.strip()]
         if not chunks_text:
             chunks_text = [full_text]
@@ -636,7 +641,7 @@ async def ingest_document(
             "org_id": org_id,
             "doc_name": filename,
             "chunk_text": unique[i]["text"],
-            "chunk_index": unique[i]["chunk_index"],   # top-level for upsert key
+            "chunk_index": unique[i]["chunk_index"],
             "embedding": all_vectors[i],
             "file_url": file_url,
             "metadata": {
