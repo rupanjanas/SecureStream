@@ -6,6 +6,8 @@ require('dotenv').config();
 const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
+const { createClient: createRedisClient } = require('redis');
+const RedisStore = require('connect-redis').default;
 
 const app = express();
 app.set("trust proxy", 1);
@@ -23,6 +25,12 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// ── Redis ─────────────────────────────────────────────────────────────────────
+
+const redisClient = createRedisClient({ url: process.env.REDIS_URL });
+redisClient.on('error', (err) => console.error('Redis error:', err));
+redisClient.connect().catch(console.error);
+
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use(cors({
@@ -33,12 +41,13 @@ app.use(cors({
 // ── Session ──────────────────────────────────────────────────────────────────
 
 app.use(session({
-  secret:           process.env.SESSION_SECRET,
-  resave:           false,
+  store: new RedisStore({ client: redisClient }),
+  secret:            process.env.SESSION_SECRET,
+  resave:            false,
   saveUninitialized: false,
   cookie: {
     secure:   true,
-    sameSite: "none",
+    sameSite: 'none',
     maxAge:   7 * 24 * 60 * 60 * 1000,
     httpOnly: true,
   },
@@ -71,8 +80,6 @@ const checkAuth = (req, res, next) => {
 };
 
 // ── Helper: extract invite token embedded in state ───────────────────────────
-// State is stored as "<randomState>|inviteToken:<uuid>" so we can recover the
-// invite token even if the session cookie is lost during the OAuth round-trip.
 
 function splitState(rawState) {
   if (!rawState) return { baseState: '', inviteToken: null };
@@ -140,21 +147,17 @@ app.get('/', (req, res) => {
 });
 
 // ── Login ─────────────────────────────────────────────────────────────────────
-// Embeds the invite token (if present in ?redirect=) into Cognito's state param
-// so it survives the round-trip even if the session cookie is dropped.
 
 app.get('/login', checkClientReady, (req, res) => {
   const nonce        = generators.nonce();
-  const baseState    = generators.state();   // pure random, no suffix
+  const baseState    = generators.state();
   const redirectPath = req.query.redirect || '';
   const inviteMatch  = redirectPath.match(/\/org\/join\/([^/?#]+)/);
 
-  // Full state sent to Cognito (and echoed back): baseState[|inviteToken:uuid]
-  const fullState  = inviteMatch ? `${baseState}|inviteToken:${inviteMatch[1]}` : baseState;
+  const fullState = inviteMatch ? `${baseState}|inviteToken:${inviteMatch[1]}` : baseState;
 
-  // Store ONLY the base state for openid-client validation — it does exact match
   req.session.nonce = nonce;
-  req.session.state = baseState;           // ← critical: no suffix here
+  req.session.state = baseState;
 
   req.session.save((err) => {
     if (err) {
@@ -164,7 +167,7 @@ app.get('/login', checkClientReady, (req, res) => {
 
     const authUrl = client.authorizationUrl({
       scope: 'phone openid email',
-      state: fullState,                    // ← Cognito echoes this back
+      state: fullState,
       nonce,
     });
 
@@ -176,16 +179,9 @@ app.get('/login', checkClientReady, (req, res) => {
 
 app.get('/callback', checkClientReady, async (req, res) => {
   try {
-    // Extract the invite token from state BEFORE openid-client validation,
-    // because callbackParams reads the raw state from the query string.
     const rawState = req.query.state || '';
     const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
 
-    // Temporarily set session.state to the base (no suffix) so openid-client
-    // can validate it. The session may already have baseState if the cookie
-    // survived; if the cookie was lost, req.session.state will be undefined
-    // and we skip state validation (acceptable since we have PKCE-equivalent
-    // protection via nonce + the invite token is a UUIDv4 from our own DB).
     if (!req.session.state && baseState) {
       req.session.state = baseState;
     }
@@ -196,7 +192,6 @@ app.get('/callback', checkClientReady, async (req, res) => {
       params,
       {
         nonce: req.session.nonce,
-        // Only validate state if we stored one (session survived the round-trip)
         ...(req.session.state ? { state: req.session.state } : {}),
       }
     );
@@ -219,19 +214,16 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     req.session.memberships = memberships || [];
 
-    // Priority 1: invite token embedded in state (survives cookie loss)
     if (stateInviteToken) {
       return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
     }
 
-    // Priority 2: invite token saved in session cookie (normal round-trip)
     const pendingToken = req.session.pendingInviteToken;
     if (pendingToken) {
       delete req.session.pendingInviteToken;
       return processInviteAndRedirect(req, res, pendingToken, userInfo);
     }
 
-    // No invite — auto-restore single org or go to dashboard
     if (memberships?.length === 1) {
       req.session.orgId   = memberships[0].org_id;
       req.session.orgName = memberships[0].orgs?.name;
@@ -275,7 +267,6 @@ app.get('/org/join/:token', async (req, res) => {
   const { token } = req.params;
   const user       = req.session.userInfo;
 
-  // Not logged in — save token to session and redirect to login
   if (!user) {
     req.session.pendingInviteToken = token;
     return req.session.save(() => {
@@ -286,7 +277,6 @@ app.get('/org/join/:token', async (req, res) => {
     });
   }
 
-  // Already logged in — process immediately
   const { data: invite, error } = await supabaseAdmin
     .from('invite_tokens')
     .select('*, orgs(*)')
@@ -450,6 +440,14 @@ app.post('/org/invite/email', checkAuth, async (req, res) => {
   }
 
   try {
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
     const info = await transporter.sendMail({
       from:    `"SecureStream" <${process.env.EMAIL_USER}>`,
       to:      email,
