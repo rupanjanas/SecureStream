@@ -7,7 +7,13 @@ const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 const { createClient: createRedisClient } = require('redis');
-const RedisStore = require('connect-redis').default;
+
+// connect-redis v7+ exports { default: RedisStore } (ESM-style default)
+// connect-redis v6  exports a factory: (session) => RedisStore class
+const connectRedis = require('connect-redis');
+const RedisStore = typeof connectRedis === 'function'
+  ? connectRedis(session)                    // v6
+  : (connectRedis.default || connectRedis);  // v7+
 
 const app = express();
 app.set("trust proxy", 1);
