@@ -436,7 +436,6 @@ import re
 from typing import Any, Optional
 
 import httpx
-from langchain_core.prompts import PromptTemplate
 
 from app.cache import get_cached, get_semantic_cache, set_cached, set_semantic_cache
 from app.config import settings
@@ -444,23 +443,16 @@ from app.db import db_insert, db_keyword_search, db_rpc
 
 logger = logging.getLogger(__name__)
 
-RAG_PROMPT = PromptTemplate(
-    input_variables=["context", "question"],
-    template="""You are a helpful document assistant. Answer the question using ONLY the context below.
-
-Rules:
-- Summarize and paraphrase clearly. You do not need to quote verbatim.
-- If the context contains relevant information, always use it — even if partial.
-- Only say "Not found in the uploaded document." if there is truly NO relevant information at all.
-- Never make up information not in the context.
-- Never reference URLs or bibliography entries.
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:""",
+# Plain string — no langchain_core dependency needed
+RAG_PROMPT = (
+    "You are a helpful document assistant. Answer the question using ONLY the context below.\n\n"
+    "Rules:\n"
+    "- Summarize and paraphrase clearly. You do not need to quote verbatim.\n"
+    "- If the context contains relevant information, always use it — even if partial.\n"
+    "- Only say \"Not found in the uploaded document.\" if there is truly NO relevant information at all.\n"
+    "- Never make up information not in the context.\n"
+    "- Never reference URLs or bibliography entries.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
 )
 
 STOP_WORDS: set[str] = {
@@ -482,8 +474,7 @@ def filter_junk(chunks: list[dict]) -> list[dict]:
         sentences = [s.strip() for s in text.split(".") if s.strip()]
         if not sentences:
             continue
-        junk_ratio = sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences)
-        if junk_ratio <= 0.5:
+        if sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences) <= 0.5:
             clean.append(c)
     return clean
 
@@ -548,8 +539,6 @@ def build_context(chunks: list[dict], max_words: int = 1200) -> str:
 
 
 def deduplicate(chunks: list[dict]) -> list[dict]:
-    # FIX: keep highest-similarity version on collision so vector scores
-    # (actual cosine) are not discarded in favour of keyword-scored duplicates.
     seen: dict = {}
     for c in chunks:
         meta = c.get("metadata") or {}
@@ -561,11 +550,10 @@ def deduplicate(chunks: list[dict]) -> list[dict]:
 
 
 def _extract_keywords(question: str) -> list[str]:
-    q_lower = question.lower().strip()
     terms = list(dict.fromkeys(
-        w for w in re.findall(r"\b[a-zA-Z]{4,}\b", q_lower) if w not in STOP_WORDS
+        w for w in re.findall(r"\b[a-zA-Z]{4,}\b", question.lower()) if w not in STOP_WORDS
     ))[:4]
-    return terms if terms else [q_lower]
+    return terms if terms else [question.lower().strip()]
 
 
 def _score_keyword_chunk(chunk: dict, kw_terms: list[str]) -> float:
@@ -620,19 +608,22 @@ async def retrieve(
             return []
 
     kw_chunks, vec_chunks = await asyncio.gather(keyword_search(), vector_search())
-
     combined = deduplicate(kw_chunks + vec_chunks)
     combined = filter_junk(combined)
     combined = rerank(question, combined)
     combined = combined[:top_k]
-
     logger.info("retrieve: final=%d chunks org=%s", len(combined), org_id)
     return combined
 
 
 async def save_query_log(org_id: str, question: str, answer: str, source_passages: list) -> None:
     try:
-        await db_insert("query_logs", [{"org_id": org_id, "question": question, "answer": answer, "sources": json.dumps(source_passages)}])
+        await db_insert("query_logs", [{
+            "org_id": org_id,
+            "question": question,
+            "answer": answer,
+            "sources": json.dumps(source_passages),
+        }])
     except Exception:
         logger.exception("Failed to save query log")
 

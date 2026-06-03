@@ -16,8 +16,11 @@ class Settings(BaseSettings):
     top_k_comparison: int = 8
     top_k_summary: int = 12
     context_max_words: int = 2500
-    chunk_size: int = 512
-    chunk_overlap: int = 64
+
+    # Character counts (not tokens). 2000 chars ≈ 350 words.
+    chunk_size: int = 2000
+    chunk_overlap: int = 300
+
     groq_model: str = "llama-3.1-8b-instant"
     groq_temperature: float = 0.1
     groq_max_tokens: int = 600

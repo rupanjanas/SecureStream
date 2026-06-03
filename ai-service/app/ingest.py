@@ -242,24 +242,7 @@ async def upload_to_storage(file_bytes: bytes, filename: str) -> str:
     
 from __future__ import annotations
 
-"""
-ingest.py — document ingestion: extract → chunk → embed → store.
-
-Production fixes applied:
-1.  embed_texts: exponential-backoff retry on 429 / 5xx from Jina (up to 3 attempts).
-2.  ingest_document: uses db_upsert (not db_insert) to avoid duplicate rows on
-    re-ingest of the same document (unique key: org_id + doc_name + chunk_index).
-3.  Page-count / word-count guard before semantic splitting to prevent OOM on
-    huge documents (configurable via settings.max_ingest_pages / max_ingest_words).
-4.  upload_to_storage: single retry on transient failure.
-5.  process_and_chunk_document: page-assignment loop verified correct —
-    walks all mappings and keeps last one whose start <= pos, then breaks on
-    first mapping whose start > pos (sorted ascending); logic is sound.
-6.  clean_document_text: improved regex order to avoid double-spacing.
-7.  Structured logging throughout; no bare print() in hot paths.
-8.  _splitter instantiation is deferred to first use (lazy singleton) to avoid
-    import-time model download blocking startup.
-"""
+from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -271,63 +254,26 @@ from typing import Any, Optional
 
 import fitz
 import httpx
-from llama_index.core import Document
-from llama_index.core.node_parser import SemanticSplitterNodeParser
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from app.config import settings
-from app.db import BASE, HEADERS, db_upsert
+from app.db import BASE, db_upsert
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Semantic splitter (lazy singleton — avoids model download at import time)
-# ---------------------------------------------------------------------------
+# ── Jina embedding ───────────────────────────────────────────────────────────
 
-_splitter: Optional[SemanticSplitterNodeParser] = None
-_SPLITTER_LOCK = asyncio.Lock()
-
-
-async def _get_splitter() -> SemanticSplitterNodeParser:
-    global _splitter
-    if _splitter is None:
-        async with _SPLITTER_LOCK:
-            if _splitter is None:
-                embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-                _splitter = SemanticSplitterNodeParser(
-                    buffer_size=1,
-                    breakpoint_percentile_threshold=95,
-                    embed_model=embed_model,
-                )
-    return _splitter
-
-
-# ---------------------------------------------------------------------------
-# Jina embedding (with retry)
-# ---------------------------------------------------------------------------
-
-# Semaphore: at most 4 concurrent Jina batches across all in-flight requests.
 _JINA_SEM = asyncio.Semaphore(4)
-
 _JINA_RETRYABLE = {429, 500, 502, 503, 504}
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
-    """
-    Embed texts via Jina v3.
-    Batches into groups of 32 with a concurrency semaphore.
-    Retries up to 3 times with exponential backoff on 429 / 5xx.
-    """
     if not texts:
         return []
-
     all_vectors: list[list[float]] = []
-
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         for i in range(0, len(texts), 32):
-            batch = texts[i : i + 32]
+            batch = texts[i:i + 32]
             last_exc: Optional[Exception] = None
-
             for attempt in range(3):
                 try:
                     async with _JINA_SEM:
@@ -343,90 +289,68 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
                                 "task": "retrieval.passage",
                             },
                         )
-
                     if r.status_code in _JINA_RETRYABLE:
                         wait = 2 ** attempt
-                        logger.warning(
-                            "Jina embed HTTP %d — retry %d in %ds",
-                            r.status_code, attempt + 1, wait,
-                        )
+                        logger.warning("Jina HTTP %d — retry %d in %ds", r.status_code, attempt + 1, wait)
                         await asyncio.sleep(wait)
                         continue
-
                     r.raise_for_status()
                     all_vectors.extend(item["embedding"] for item in r.json()["data"])
-                    break  # success
-
+                    break
                 except httpx.TimeoutException as exc:
                     last_exc = exc
                     wait = 2 ** attempt
-                    logger.warning("Jina embed timeout — retry %d in %ds", attempt + 1, wait)
+                    logger.warning("Jina timeout — retry %d in %ds", attempt + 1, wait)
                     await asyncio.sleep(wait)
-
             else:
                 raise RuntimeError(
-                    f"Jina embed failed after 3 attempts for batch {i}–{i+len(batch)}"
+                    f"Jina embed failed after 3 attempts for batch starting at index {i}"
                 ) from last_exc
-
     return all_vectors
 
 
-# ---------------------------------------------------------------------------
-# Supabase Storage upload (with single retry)
-# ---------------------------------------------------------------------------
+# ── Storage upload ───────────────────────────────────────────────────────────
 
-async def upload_to_storage(
-    file_bytes: bytes,
-    filename: str,
-    org_id: str,
-) -> Optional[str]:
+async def upload_to_storage(file_bytes: bytes, filename: str, org_id: str) -> Optional[str]:
     path = f"{org_id}/{filename}"
-    storage_headers = {
+    url = f"{BASE}/storage/v1/object/public/documents/{path}"
+    headers = {
         "apikey": settings.supabase_service_key,
         "Authorization": f"Bearer {settings.supabase_service_key}",
         "Content-Type": "application/octet-stream",
         "x-upsert": "true",
     }
-    url = f"{BASE}/storage/v1/object/public/documents/{path}"
-
     for attempt in range(2):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
                 r = await client.post(
                     f"{BASE}/storage/v1/object/documents/{path}",
-                    headers=storage_headers,
+                    headers=headers,
                     content=file_bytes,
                 )
             if r.status_code in (200, 201):
                 logger.info("Storage upload OK → %s", url)
                 return url
-            logger.warning(
-                "Storage upload HTTP %d attempt %d: %s",
-                r.status_code, attempt + 1, r.text[:200],
-            )
+            logger.warning("Storage upload HTTP %d attempt %d", r.status_code, attempt + 1)
         except Exception:
             logger.exception("Storage upload exception attempt %d", attempt + 1)
         if attempt == 0:
-            await asyncio.sleep(2)  # backoff before retry
-
+            await asyncio.sleep(2)
     return None
 
 
-# ---------------------------------------------------------------------------
-# Text utilities
-# ---------------------------------------------------------------------------
+# ── Text utilities ───────────────────────────────────────────────────────────
 
 def fingerprint(text: str) -> str:
-    """MD5 fingerprint of normalised text — used for deduplication only."""
     normalised = re.sub(r"[^\w\s]", "", re.sub(r"\s+", " ", text.lower().strip()))
     return hashlib.md5(normalised.encode()).hexdigest()
 
 
 def clean_document_text(text: str) -> str:
-    text = re.sub(r"-\s*\n\s*", "", text)                  # dehyphenate line breaks first
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)       # fix PDF word-boundary loss
+    text = re.sub(r"-\s*\n\s*", "", text)
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = re.sub(r"([.!?,:;])([A-Za-z])", r"\1 \2", text)
-    text = re.sub(r"\s+", " ", text)                        # collapse whitespace last
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -437,118 +361,119 @@ def is_junk(text: str) -> bool:
     sentences = [s.strip() for s in text.split(".") if s.strip()]
     if not sentences:
         return True
-    junk_ratio = sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences)
-    return junk_ratio > 0.5
+    return sum(1 for s in sentences if _JUNK_RE.search(s)) / len(sentences) > 0.5
 
 
-# ---------------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------------
+# ── Lightweight chunker (replaces SemanticSplitterNodeParser + HuggingFace) ─
+#
+# Removes ~350 MB of RAM used by the local BAAI/bge-small-en-v1.5 model.
+# Strategy: split on paragraph → sentence boundaries, add character-level
+# overlap, hard-split any unit that still exceeds chunk_size.
 
-async def process_and_chunk_document(
+_SENT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'])')
+
+
+def _units(text: str) -> list[str]:
+    """Paragraph-then-sentence split; handles both structured and raw text."""
+    result: list[str] = []
+    for para in re.split(r'\n{2,}', text):
+        para = para.strip()
+        if not para:
+            continue
+        sents = [s.strip() for s in _SENT_RE.split(para) if s.strip()]
+        result.extend(sents if sents else [para])
+    return result
+
+
+def chunk_text(text: str, chunk_size: int | None = None, overlap: int | None = None) -> list[str]:
+    cs = chunk_size if chunk_size is not None else settings.chunk_size
+    ov = min(overlap if overlap is not None else settings.chunk_overlap, cs // 4)
+
+    units = _units(text)
+    if not units:
+        return [text.strip()] if text.strip() else []
+
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+
+    for unit in units:
+        unit_len = len(unit) + 1
+
+        if buf_len + unit_len > cs and buf:
+            chunks.append(" ".join(buf))
+            # carry-over: keep last `ov` chars of sentences for context
+            carry, carry_len = [], 0
+            for s in reversed(buf):
+                sl = len(s) + 1
+                if carry_len + sl > ov:
+                    break
+                carry.insert(0, s)
+                carry_len += sl
+            buf, buf_len = carry, carry_len
+
+        if len(unit) > cs:
+            # Single unit longer than chunk_size (table row, long list item)
+            if buf:
+                chunks.append(" ".join(buf))
+                buf, buf_len = [], 0
+            for start in range(0, len(unit), cs - ov):
+                part = unit[start:start + cs].strip()
+                if part:
+                    chunks.append(part)
+        else:
+            buf.append(unit)
+            buf_len += unit_len
+
+    if buf:
+        chunks.append(" ".join(buf))
+
+    return [c for c in chunks if c.strip()]
+
+
+# ── Per-page chunking pipeline ───────────────────────────────────────────────
+
+def process_and_chunk_document(
     doc_pages: list[dict[str, Any]],
     filename: str,
 ) -> list[dict[str, Any]]:
     """
-    Semantically chunk a multi-page document.
-
-    Returns a list of dicts:
-      {"text": str, "page": int, "doc_name": str, "chunk_index": int}
-
-    Page-assignment algorithm:
-      Walk page_offsets in ascending order; keep the last mapping whose
-      start <= chunk position.  The `break` after `mapping["start"] > pos`
-      is safe because offsets are sorted ascending — no need to look further.
+    Chunk each page independently for accurate page attribution.
+    Returns list of {text, page, doc_name, chunk_index}.
     """
-    segments: list[str] = []
-    page_offsets: list[dict] = []
-    offset = 0
+    result: list[dict[str, Any]] = []
+    chunk_index = 0
 
-    for page_data in doc_pages:
-        cleaned = clean_document_text(page_data["text"])
+    for page in doc_pages:
+        cleaned = clean_document_text(page["text"])
         if not cleaned or len(cleaned.split()) < 10:
             continue
-        page_offsets.append(
-            {
-                "page_num": page_data["page_num"],
-                "start": offset,
-                "end": offset + len(cleaned),
-            }
-        )
-        segments.append(cleaned)
-        offset += len(cleaned) + 1  # +1 for the join separator
-
-    if not segments:
-        return []
-
-    full_text = " ".join(segments)
-    total_words = len(full_text.split())
-
-    # Guard against documents that would OOM the splitter
-    max_words = getattr(settings, "max_ingest_words", 200_000)
-    if total_words > max_words:
-        logger.warning(
-            "%s: %d words exceeds limit %d — truncating before chunking",
-            filename, total_words, max_words,
-        )
-        full_text = " ".join(full_text.split()[:max_words])
-
-    # Semantic chunking with graceful fallback
-    try:
-        splitter = await _get_splitter()
-        nodes = splitter.get_nodes_from_documents([Document(text=full_text)])
-        chunks_text = [n.text for n in nodes if n.text.strip()]
-    except Exception:
-        logger.exception(
-            "%s: Semantic splitter failed — falling back to paragraph split", filename
-        )
-        chunks_text = [p.strip() for p in re.split(r"\n{2,}", full_text) if p.strip()]
-        if not chunks_text:
-            chunks_text = [full_text]
-
-    processed: list[dict] = []
-    cursor = 0
-
-    for i, chunk_text in enumerate(chunks_text):
-        if is_junk(chunk_text):
-            continue
-
-        search_anchor = chunk_text[:40]
-        pos = full_text.find(search_anchor, cursor)
-        if pos == -1:
-            pos = cursor
-        cursor = pos + max(len(chunk_text) - 50, 1)
-
-        assigned_page = page_offsets[0]["page_num"] if page_offsets else 1
-        for mapping in page_offsets:
-            if mapping["start"] <= pos:
-                assigned_page = mapping["page_num"]
-            else:
-                break  # sorted ascending — safe to stop
-
-        processed.append(
-            {
-                "text": chunk_text,
-                "page": assigned_page,
+        for text in chunk_text(cleaned):
+            if not text.strip() or is_junk(text):
+                continue
+            result.append({
+                "text": text,
+                "page": page["page_num"],
                 "doc_name": filename,
-                "chunk_index": i,
-            }
-        )
+                "chunk_index": chunk_index,
+            })
+            chunk_index += 1
 
-    return processed
+    return result
 
 
-# ---------------------------------------------------------------------------
-# PDF / TXT extraction
-# ---------------------------------------------------------------------------
+# ── PDF / TXT extraction ─────────────────────────────────────────────────────
 
 def extract_pdf_pages(path: str) -> list[dict[str, Any]]:
     doc = fitz.open(path)
     if doc.is_encrypted:
         doc.close()
         raise ValueError("PDF is password-protected")
-    pages = []
+    pages: list[dict[str, Any]] = []
     for page_num, page in enumerate(doc, start=1):
+        if page_num > settings.max_ingest_pages:
+            logger.warning("PDF truncated at %d pages", settings.max_ingest_pages)
+            break
         blocks = page.get_text("blocks")
         texts = [
             b[4].strip()
@@ -559,12 +484,6 @@ def extract_pdf_pages(path: str) -> list[dict[str, Any]]:
         if text.strip():
             pages.append({"page_num": page_num, "text": text})
     doc.close()
-
-    max_pages = getattr(settings, "max_ingest_pages", 500)
-    if len(pages) > max_pages:
-        logger.warning("PDF has %d pages; truncating to %d", len(pages), max_pages)
-        pages = pages[:max_pages]
-
     return pages
 
 
@@ -572,9 +491,7 @@ def extract_txt_pages(raw: str) -> list[dict[str, Any]]:
     return [{"page_num": 1, "text": raw}]
 
 
-# ---------------------------------------------------------------------------
-# Main ingest entry-point
-# ---------------------------------------------------------------------------
+# ── Main ingest entry-point ──────────────────────────────────────────────────
 
 async def ingest_document(
     file_bytes: bytes,
@@ -583,11 +500,8 @@ async def ingest_document(
     domain: str = "general",
 ) -> dict:
     suffix = ".pdf" if filename.lower().endswith(".pdf") else ".txt"
-
-    # 1. Upload original to Supabase Storage (failure is non-fatal)
     file_url = await upload_to_storage(file_bytes, filename, org_id)
 
-    # 2. Extract pages
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
@@ -596,46 +510,39 @@ async def ingest_document(
         if suffix == ".pdf":
             pages = extract_pdf_pages(tmp_path)
         else:
-            raw = file_bytes.decode("utf-8", errors="ignore")
-            pages = extract_txt_pages(raw)
+            pages = extract_txt_pages(file_bytes.decode("utf-8", errors="ignore"))
     except ValueError as exc:
-        # Encrypted PDF etc.
-        return {
-            "message": str(exc),
-            "chunks_stored": 0,
-            "doc_name": filename,
-            "file_url": file_url,
-        }
+        return {"message": str(exc), "chunks_stored": 0, "doc_name": filename, "file_url": file_url}
     finally:
         os.unlink(tmp_path)
 
-    # 3. Semantic chunking (async — splitter init is lazy)
-    chunks = await process_and_chunk_document(pages, filename)
+    # Word-count guard: truncate pages before chunking, not after
+    total_words = sum(len(p["text"].split()) for p in pages)
+    if total_words > settings.max_ingest_words:
+        logger.warning("%s: %d words > limit, truncating", filename, total_words)
+        trimmed, count = [], 0
+        for p in pages:
+            words = p["text"].split()
+            remaining = settings.max_ingest_words - count
+            if count + len(words) > settings.max_ingest_words:
+                if remaining > 100:
+                    trimmed.append({"page_num": p["page_num"], "text": " ".join(words[:remaining])})
+                break
+            trimmed.append(p)
+            count += len(words)
+        pages = trimmed
 
+    chunks = process_and_chunk_document(pages, filename)
     if not chunks:
-        return {
-            "message": "No content extracted",
-            "chunks_stored": 0,
-            "doc_name": filename,
-            "file_url": file_url,
-        }
+        return {"message": "No content extracted", "chunks_stored": 0, "doc_name": filename, "file_url": file_url}
 
-    # 4. Deduplicate before embedding
+    # Dedup
     seen: set[str] = set()
-    unique: list[dict] = []
-    for c in chunks:
-        fp = fingerprint(c["text"])
-        if fp not in seen:
-            seen.add(fp)
-            unique.append(c)
-
+    unique = [c for c in chunks if (fp := fingerprint(c["text"])) not in seen and not seen.add(fp)]  # type: ignore[func-returns-value]
     logger.info("%s: %d chunks → %d unique after dedup", filename, len(chunks), len(unique))
 
-    # 5. Embed
-    texts = [c["text"] for c in unique]
-    all_vectors = await embed_texts(texts)
+    all_vectors = await embed_texts([c["text"] for c in unique])
 
-    # 6. Build rows
     rows = [
         {
             "org_id": org_id,
@@ -657,9 +564,7 @@ async def ingest_document(
         for i in range(len(unique))
     ]
 
-    # 7. Upsert (idempotent — safe to re-ingest the same document)
     await db_upsert("documents", rows, on_conflict="org_id,doc_name,chunk_index")
-
     return {
         "message": "Ingested successfully",
         "chunks_stored": len(rows),
