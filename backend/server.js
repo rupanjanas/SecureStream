@@ -8,13 +8,6 @@ const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 const { createClient: createRedisClient } = require('redis');
 
-// connect-redis v7+ exports { default: RedisStore } (ESM-style default)
-// connect-redis v6  exports a factory: (session) => RedisStore class
-const connectRedis = require('connect-redis');
-const RedisStore = typeof connectRedis === 'function'
-  ? connectRedis(session)                    // v6
-  : (connectRedis.default || connectRedis);  // v7+
-
 const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
@@ -31,11 +24,62 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── Redis ─────────────────────────────────────────────────────────────────────
+// ── Redis client ──────────────────────────────────────────────────────────────
 
 const redisClient = createRedisClient({ url: process.env.REDIS_URL });
 redisClient.on('error', (err) => console.error('Redis error:', err));
 redisClient.connect().catch(console.error);
+
+// ── Custom Redis session store (no connect-redis dependency) ──────────────────
+//
+// Implements the full express-session Store interface directly on top of the
+// redis client — eliminates all connect-redis version confusion forever.
+
+class RedisSessionStore extends session.Store {
+  constructor(client, ttlSeconds = 7 * 24 * 60 * 60) {
+    super();
+    this.client = client;
+    this.ttl    = ttlSeconds;
+  }
+
+  _key(sid) { return `sess:${sid}`; }
+
+  get(sid, cb) {
+    this.client.get(this._key(sid))
+      .then(data => {
+        if (!data) return cb(null, null);
+        try { cb(null, JSON.parse(data)); }
+        catch (e) { cb(e); }
+      })
+      .catch(cb);
+  }
+
+  set(sid, sess, cb) {
+    let ttl = this.ttl;
+    if (sess && sess.cookie && sess.cookie.expires) {
+      ttl = Math.max(1, Math.floor((new Date(sess.cookie.expires) - Date.now()) / 1000));
+    }
+    this.client.setEx(this._key(sid), ttl, JSON.stringify(sess))
+      .then(() => cb(null))
+      .catch(cb);
+  }
+
+  destroy(sid, cb) {
+    this.client.del(this._key(sid))
+      .then(() => cb(null))
+      .catch(cb);
+  }
+
+  touch(sid, sess, cb) {
+    let ttl = this.ttl;
+    if (sess && sess.cookie && sess.cookie.expires) {
+      ttl = Math.max(1, Math.floor((new Date(sess.cookie.expires) - Date.now()) / 1000));
+    }
+    this.client.expire(this._key(sid), ttl)
+      .then(() => cb(null))
+      .catch(cb);
+  }
+}
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -47,7 +91,7 @@ app.use(cors({
 // ── Session ──────────────────────────────────────────────────────────────────
 
 app.use(session({
-  store: new RedisStore({ client: redisClient }),
+  store:             new RedisSessionStore(redisClient),
   secret:            process.env.SESSION_SECRET,
   resave:            false,
   saveUninitialized: false,
@@ -123,7 +167,7 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
         { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
       ];
     } else {
-      console.warn('[invite] Invalid or expired token:', inviteToken, error?.message);
+      console.warn('[invite] Invalid or expired token:', inviteToken, error && error.message);
     }
   } catch (err) {
     console.error('[invite] processInviteAndRedirect error:', err.message);
@@ -143,8 +187,8 @@ app.get('/', (req, res) => {
   res.json({
     isAuthenticated: true,
     user:         req.session.userInfo             || null,
-    id_token:     req.session.tokens?.id_token     || null,
-    access_token: req.session.tokens?.access_token || null,
+    id_token:     req.session.tokens && req.session.tokens.id_token     || null,
+    access_token: req.session.tokens && req.session.tokens.access_token || null,
     orgId:        req.session.orgId                || null,
     orgName:      req.session.orgName              || null,
     mode:         req.session.mode                 || null,
@@ -164,8 +208,6 @@ app.get('/login', checkClientReady, (req, res) => {
     ? `${baseState}|inviteToken:${inviteMatch[1]}`
     : baseState;
 
-  // FIX: Store nonce and the BASE state (without the invite suffix) so
-  // the callback can verify them correctly.
   req.session.nonce = nonce;
   req.session.state = baseState;
 
@@ -192,42 +234,23 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const rawState = req.query.state || '';
     const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
 
-    // FIX: Read the expected nonce and state strictly from the session.
-    // Never fall back to the request value — that defeats the CSRF protection.
     const expectedNonce = req.session.nonce;
     const expectedState = req.session.state;
 
-    // If the session lost the nonce/state (e.g. session not rehydrated),
-    // redirect to login cleanly instead of throwing an unhandled error.
     if (!expectedNonce || !expectedState) {
-      console.error('[callback] Missing nonce or state in session. Session may not have been rehydrated. Redirecting to login.');
+      console.error('[callback] Missing nonce or state in session — redirecting to login.');
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
-    // FIX: openid-client checks state against what we pass here.
-    // We must pass the BASE state (without the invite suffix) because that
-    // is what we stored in the session at login time.
     const params = client.callbackParams(req);
 
-    // Temporarily override the state param so openid-client validates
-    // against the base state we stored, not the full compound state.
-    // (callbackParams reads req.query.state; we reconstruct params cleanly.)
-    const callbackChecks = {
-      nonce: expectedNonce,
-      state: expectedState,
-      // Pass the base state as the expected value; provide the base state
-      // as the received value so the library comparison passes.
-      // We do this by re-assigning params.state before validation.
-    };
-
-    // Replace the compound state in params with just the base portion
-    // so openid-client's state comparison (params.state === checks.state) passes.
+    // Strip the invite suffix so openid-client compares baseState == baseState
     params.state = baseState;
 
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
       params,
-      callbackChecks
+      { nonce: expectedNonce, state: expectedState }
     );
 
     const userInfo = await client.userinfo(tokenSet.access_token);
@@ -239,7 +262,6 @@ app.get('/callback', checkClientReady, async (req, res) => {
       refresh_token: tokenSet.refresh_token,
     };
 
-    // FIX: Clear nonce and state AFTER successful validation.
     delete req.session.nonce;
     delete req.session.state;
 
@@ -260,9 +282,9 @@ app.get('/callback', checkClientReady, async (req, res) => {
       return processInviteAndRedirect(req, res, pendingToken, userInfo);
     }
 
-    if (memberships?.length === 1) {
+    if (memberships && memberships.length === 1) {
       req.session.orgId   = memberships[0].org_id;
-      req.session.orgName = memberships[0].orgs?.name;
+      req.session.orgName = memberships[0].orgs && memberships[0].orgs.name;
       req.session.mode    = 'org';
     }
 
@@ -279,7 +301,7 @@ app.get('/callback', checkClientReady, async (req, res) => {
 // ── Refresh token ─────────────────────────────────────────────────────────────
 
 app.post('/refresh', async (req, res) => {
-  const refreshToken = req.session.tokens?.refresh_token;
+  const refreshToken = req.session.tokens && req.session.tokens.refresh_token;
   if (!refreshToken) {
     return res.status(401).json({ error: "No refresh token — please log in again." });
   }
@@ -386,10 +408,10 @@ app.post('/org/select', checkAuth, async (req, res) => {
     if (!data) return res.status(403).json({ error: 'Not a member of this org' });
 
     req.session.orgId   = data.org_id;
-    req.session.orgName = data.orgs?.name;
+    req.session.orgName = data.orgs && data.orgs.name;
     req.session.mode    = 'org';
     return req.session.save(() =>
-      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs?.name })
+      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs && data.orgs.name })
     );
   }
 
@@ -399,7 +421,7 @@ app.post('/org/select', checkAuth, async (req, res) => {
 // ── Org: create ───────────────────────────────────────────────────────────────
 
 app.post('/org/create', async (req, res) => {
-  if (!req.session?.userInfo) {
+  if (!req.session || !req.session.userInfo) {
     return res.status(401).json({ error: "not_authenticated" });
   }
 
@@ -465,8 +487,8 @@ app.post('/org/invite', checkAuth, async (req, res) => {
 
 app.post('/org/invite/email', checkAuth, async (req, res) => {
   const { email, inviteUrl } = req.body;
-  const orgName    = req.session.orgName             || 'SecureStream';
-  const senderName = req.session.userInfo?.given_name || 'A teammate';
+  const orgName    = req.session.orgName                    || 'SecureStream';
+  const senderName = req.session.userInfo && req.session.userInfo.given_name || 'A teammate';
 
   if (!email || !inviteUrl) {
     return res.status(400).json({ error: 'Email and inviteUrl required' });
