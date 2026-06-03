@@ -1,9 +1,18 @@
-fastapi
-uvicorn[standard]
-pydantic[email]
-pydantic-settings
-httpx
-redis[asyncio]
-python-jose[cryptography]
-PyMuPDF
-numpy
+# ── Web framework ──────────────────────────────────────────────
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+python-multipart==0.0.20      # required by FastAPI for File / UploadFile
+# ── HTTP client ────────────────────────────────────────────────
+httpx==0.28.1
+# ── Data validation ────────────────────────────────────────────
+pydantic==2.10.6
+pydantic-settings==2.8.1
+# ── JWT / Auth ─────────────────────────────────────────────────
+python-jose==3.3.0            # jose.jwt + jose.jwk for Cognito RS256 tokens
+cryptography==44.0.3          # required backend for python-jose[cryptography]
+
+# ── Cache / Rate limiting ──────────────────────────────────────
+redis==5.2.1                  # redis.asyncio — v5 is stable; v6+ changed some APIs
+numpy==1.26.4                 # cosine similarity in cache.py; 1.x avoids 2.x breakage risk
+# ── PDF extraction ─────────────────────────────────────────────
+pymupdf==1.24.14              # fitz — 1.24.x is stable LTS line; 1.25+ changed some APIs
