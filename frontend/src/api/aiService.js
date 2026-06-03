@@ -134,7 +134,7 @@ export async function askQuestionStream(
   onToken,
   onDone,
   topK  = 5,
-  orgId = null,
+  orgId = null,   // FIX: callers must pass orgId; null means personal workspace
 ) {
   const token = await getFreshToken();
   if (!token) throw new Error("Session expired — please log in again.");
@@ -143,6 +143,8 @@ export async function askQuestionStream(
     "Content-Type": "application/json",
     Authorization:  `Bearer ${token}`,
   };
+  // FIX: only add the header when orgId is a real value — prevents the backend
+  // from interpreting "null" (stringified) as an org ID.
   if (orgId) headers["X-Org-Id"] = orgId;
 
   const res = await fetch(`${AI_URL}/query/stream`, {

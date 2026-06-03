@@ -1,17 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
-import { askQuestionStream, } from "../api/aiService";
+import { askQuestionStream } from "../api/aiService";
 import { generateInvite, sendEmailInvite } from "../api/orgService";
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 
 // ── Shared prompt log key ─────────────────────────────────────────────────────
-// In org mode, prompts are stored in localStorage keyed by orgId so all
-// members on the same machine see the same history. For true real-time sharing
-// across devices you would need a Supabase subscription — this covers the
-// single-device / same-browser case and persists across refreshes.
-
 function getOrgChatKey(orgId) {
   return `org_chat_${orgId}`;
 }
@@ -33,7 +28,6 @@ function saveOrgMessages(orgId, messages) {
 }
 
 // ── Message component ─────────────────────────────────────────────────────────
-
 function Message({ msg, isOrg }) {
   const isUser = msg.role === "user";
   return (
@@ -82,7 +76,6 @@ function Message({ msg, isOrg }) {
 }
 
 // ── Invite panel ──────────────────────────────────────────────────────────────
-
 function InvitePanel({ onClose }) {
   const [inviteUrl, setInviteUrl]   = useState("");
   const [email, setEmail]           = useState("");
@@ -134,7 +127,6 @@ function InvitePanel({ onClose }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg">✕</button>
         </div>
 
-        {/* Step 1 — Generate link */}
         <div className="mb-5">
           <p className="text-xs text-gray-500 mb-3">Generate an invite link to share with your team:</p>
           {!inviteUrl ? (
@@ -167,7 +159,6 @@ function InvitePanel({ onClose }) {
           )}
         </div>
 
-        {/* Step 2 — Send via email */}
         {inviteUrl && (
           <div className="border-t border-gray-100 pt-5">
             <p className="text-xs text-gray-500 mb-3">Or send directly via email:</p>
@@ -195,10 +186,7 @@ function InvitePanel({ onClose }) {
           </div>
         )}
 
-        {error && (
-          <p className="text-xs text-red-500 mt-3">{error}</p>
-        )}
-
+        {error && <p className="text-xs text-red-500 mt-3">{error}</p>}
         <p className="text-xs text-gray-400 mt-4">
           Anyone with this link can join your workspace as a member.
         </p>
@@ -208,10 +196,17 @@ function InvitePanel({ onClose }) {
 }
 
 // ── Main ChatPage ─────────────────────────────────────────────────────────────
-
 export default function ChatPage({ user, orgId, orgName, mode }) {
   const isOrg    = mode === "org";
   const navigate = useNavigate();
+
+  // FIX: read orgId from session via ref so send() always has the latest value
+  // even if the prop arrives after initial render.
+  const orgIdRef = useRef(orgId || null);
+  useEffect(() => {
+    // Keep ref in sync if prop updates (e.g. workspace switch)
+    orgIdRef.current = orgId || null;
+  }, [orgId]);
 
   // ── Messages — org mode uses persistent shared log, personal uses session ──
   const [messages, setMessages] = useState(() => {
@@ -264,8 +259,13 @@ export default function ChatPage({ user, orgId, orgName, mode }) {
     setLoading(true);
 
     try {
+      // FIX: pass orgIdRef.current so the backend scopes the query to the
+      // correct org — previously null was always passed here, which meant
+      // newly-invited members could not query org documents.
       await askQuestionStream(
         question,
+        null,         // no specific doc — searches all
+        [],           // chat history not threaded in global chat
         (token) => {
           setMessages((m) => {
             const updated = [...m];
@@ -286,8 +286,8 @@ export default function ChatPage({ user, orgId, orgName, mode }) {
           });
           setLoading(false);
         },
-        3,    // topK
-        null  // no specific doc — searches all
+        3,                   // topK
+        orgIdRef.current,    // FIX: was hardcoded null
       );
     } catch (err) {
       setMessages((m) => {
@@ -350,7 +350,6 @@ export default function ChatPage({ user, orgId, orgName, mode }) {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Invite button — org admins only */}
             {isOrg && (
               <button
                 onClick={() => setShowInvite(true)}

@@ -4,13 +4,18 @@ import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
 import { retrieveFile } from "../utils/filestore";
 import {
-  getOrgMembers,  
+  getOrgMembers,
   getOnlineMembers,
   pingPresence,
 } from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { askQuestionStream, getDocumentText, getSharedChatHistory, saveSharedChatHistory } from "../api/aiService";
+import {
+  askQuestionStream,
+  getDocumentText,
+  getSharedChatHistory,
+  saveSharedChatHistory,
+} from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AUTH_URL          = import.meta.env.VITE_BACKEND_URL;
@@ -237,41 +242,41 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
 }
 
 function InviteModal({ orgName, onClose, token }) {
-  const [copied, setCopied]               = useState(false);
-  const [inviteLink, setInviteLink]       = useState("");
-  const [linkLoading, setLinkLoading]     = useState(true);  // start true
-  const [linkError, setLinkError]         = useState("");
+  const [copied, setCopied]         = useState(false);
+  const [inviteLink, setInviteLink] = useState("");
+  const [linkLoading, setLinkLoading] = useState(true);
+  const [linkError, setLinkError]   = useState("");
 
   const fetchInviteLink = useCallback(() => {
-  if (!token) {
-    setLinkError("Authentication not ready. Please close and reopen.");
-    setLinkLoading(false);
-    return;
-  }
-  fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
-    method:      "POST",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization:  `Bearer ${token}`,
-    },
-  })
-    .then((r) => {
-      if (!r.ok) throw new Error(`Server returned ${r.status}`);
-      return r.json();
-    })
-    .then((d) => {
-      if (!d.inviteUrl) throw new Error("No inviteUrl in response");
-      setInviteLink(d.inviteUrl);
-      setLinkError("");
+    if (!token) {
+      setLinkError("Authentication not ready. Please close and reopen.");
       setLinkLoading(false);
+      return;
+    }
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
+      method:      "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:  `Bearer ${token}`,
+      },
     })
-    .catch((err) => {
-      console.error("[InviteModal] fetch failed:", err.message);
-      setLinkError("Could not generate invite link. Try closing and reopening.");
-      setLinkLoading(false);
-    });
-}, [token]);
+      .then((r) => {
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        return r.json();
+      })
+      .then((d) => {
+        if (!d.inviteUrl) throw new Error("No inviteUrl in response");
+        setInviteLink(d.inviteUrl);
+        setLinkError("");
+        setLinkLoading(false);
+      })
+      .catch((err) => {
+        console.error("[InviteModal] fetch failed:", err.message);
+        setLinkError("Could not generate invite link. Try closing and reopening.");
+        setLinkLoading(false);
+      });
+  }, [token]);
 
   useEffect(() => {
     const id = window.setTimeout(fetchInviteLink, 0);
@@ -300,13 +305,9 @@ function InviteModal({ orgName, onClose, token }) {
             </svg>
           </button>
         </div>
-
         <div className="px-5 py-5 flex flex-col gap-5">
-
-          {/* ── Shareable link ── */}
           <div>
             <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
-
             {linkLoading ? (
               <div className="flex items-center gap-2 border border-gray-200 rounded-xl px-3 py-2.5 bg-gray-50">
                 <svg className="animate-spin flex-shrink-0" width="14" height="14" viewBox="0 0 24 24"
@@ -318,11 +319,7 @@ function InviteModal({ orgName, onClose, token }) {
             ) : linkError ? (
               <div className="border border-red-200 rounded-xl px-3 py-2.5 bg-red-50">
                 <p className="text-xs text-red-500">{linkError}</p>
-                <button
-                  onClick={fetchInviteLink}
-                  className="text-xs text-red-500 underline mt-1">
-                  Retry
-                </button>
+                <button onClick={fetchInviteLink} className="text-xs text-red-500 underline mt-1">Retry</button>
               </div>
             ) : (
               <div className="flex gap-2">
@@ -479,30 +476,49 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const CHAT_KEY    = chatKey(docName);
   const SOURCES_KEY = sourcesKey(docName);
 
-  const tokenRef = useRef(null);
-  const orgIdRef = useRef(null);
+  // ── Token / orgId bootstrap ──────────────────────────────────────────────
+  // FIX: both tokenRef and orgIdRef are populated in a single fetch effect.
+  // The shared-history effect depends on tokenReady, which only flips after
+  // both values are set, so there is no race between them.
+  const tokenRef  = useRef(null);
+  const orgIdRef  = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
-  // ── Load shared chat history for org members ─────────────────────────────
-useEffect(() => {
-  if (!isOrg || !tokenReady || !docName) return;
-  getSharedChatHistory(docName, tokenRef.current, orgIdRef.current)
-    .then(({ messages: msgs, sources }) => {
-      setMessages((msgs || []).filter((m) => !m.streaming && m.content));
-      setSourcesHistory(sources || []);
-      setSharedHistoryLoaded(true);
-    })
-    .catch(() => setSharedHistoryLoaded(true));
-}, [isOrg, tokenReady, docName]);
+
   useEffect(() => {
     fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
-      .then((d) => { tokenRef.current = d.access_token || "dev-token";orgIdRef.current = d.orgId || null;  setTokenReady(true); })
-      .catch(()  => { tokenRef.current = "dev-token"; setTokenReady(true); });
+      .then((d) => {
+        tokenRef.current  = d.access_token || "dev-token";
+        orgIdRef.current  = d.orgId || null;   // FIX: capture orgId here
+        setTokenReady(true);
+      })
+      .catch(() => {
+        tokenRef.current = "dev-token";
+        setTokenReady(true);
+      });
   }, []);
 
+  // ── Shared chat history (org mode only) ──────────────────────────────────
+  // FIX: this effect now runs after tokenReady is true, which guarantees
+  // orgIdRef.current is populated before the fetch is attempted.
+  const [sharedHistoryLoaded, setSharedHistoryLoaded] = useState(!isOrg);
+
+  useEffect(() => {
+    if (!isOrg || !tokenReady || !docName) return;
+    getSharedChatHistory(docName, tokenRef.current, orgIdRef.current)
+      .then(({ messages: msgs, sources }) => {
+        setMessages((msgs || []).filter((m) => !m.streaming && m.content));
+        setSourcesHistory(sources || []);
+        setSharedHistoryLoaded(true);
+      })
+      .catch(() => setSharedHistoryLoaded(true));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOrg, tokenReady, docName]);
+
+  // ── PDF file resolution ──────────────────────────────────────────────────
   const [resolvedFileUrl, setResolvedFileUrl] = useState(fileUrl || null);
   const [manualFile, setManualFile]           = useState(null);
-  const blobUrlRef  = useRef(null);
+  const blobUrlRef   = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -552,16 +568,15 @@ useEffect(() => {
     };
   }, []);
 
+  // ── Chat / sources state ─────────────────────────────────────────────────
   const [messages, setMessages] = useState(() =>
-  isOrg
-    ? []
-    : loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
-);
-const [sourcesHistory, setSourcesHistory] = useState(() =>
-  isOrg
-    ? []
-    : loadFromStorage(sourcesKey(docName), [])
-);
+    isOrg
+      ? []   // populated by shared-history effect once token is ready
+      : loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
+  );
+  const [sourcesHistory, setSourcesHistory] = useState(() =>
+    isOrg ? [] : loadFromStorage(sourcesKey(docName), [])
+  );
   const [chatHistory, setChatHistory]           = useState([]);
   const [input, setInput]                       = useState("");
   const [loading, setLoading]                   = useState(false);
@@ -577,7 +592,6 @@ const [sourcesHistory, setSourcesHistory] = useState(() =>
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
   const [showInviteModal, setShowInviteModal]   = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
-  const [sharedHistoryLoaded, setSharedHistoryLoaded] = useState(!isOrg);
 
   const pageRefs  = useRef({});
   const bottomRef = useRef(null);
@@ -587,36 +601,38 @@ const [sourcesHistory, setSourcesHistory] = useState(() =>
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
 
+  // ── Persist messages ─────────────────────────────────────────────────────
   useEffect(() => {
-  const settled = messages.filter((m) => !m.streaming && m.content);
-  if (!settled.length || !sharedHistoryLoaded) return;
+    const settled = messages.filter((m) => !m.streaming && m.content);
+    if (!settled.length || !sharedHistoryLoaded) return;
 
-  if (isOrg && tokenReady && orgIdRef.current) {
-    const t = setTimeout(() => {
-      saveSharedChatHistory(docName, settled, sourcesHistory, tokenRef.current, orgIdRef.current);
-    }, 2000);
-    return () => clearTimeout(t);
-  } else if (!isOrg) {
-    saveToStorage(CHAT_KEY, settled);
-  }
-}, [messages, sourcesHistory, isOrg, tokenReady, sharedHistoryLoaded, docName, CHAT_KEY]);
-
-useEffect(() => {
-  if (!sourcesHistory.length || !sharedHistoryLoaded) return;
-  if (!isOrg) saveToStorage(SOURCES_KEY, sourcesHistory);
-}, [sourcesHistory, isOrg, sharedHistoryLoaded, SOURCES_KEY]);
+    if (isOrg && tokenReady && orgIdRef.current) {
+      const t = setTimeout(() => {
+        saveSharedChatHistory(docName, settled, sourcesHistory, tokenRef.current, orgIdRef.current);
+      }, 2000);
+      return () => clearTimeout(t);
+    } else if (!isOrg) {
+      saveToStorage(CHAT_KEY, settled);
+    }
+  }, [messages, sourcesHistory, isOrg, tokenReady, sharedHistoryLoaded, docName, CHAT_KEY]);
 
   useEffect(() => {
-  if (!docName) {
-    navigate("/dashboard", { replace: true });
-  }
-}, [docName, navigate]);
+    if (!sourcesHistory.length || !sharedHistoryLoaded) return;
+    if (!isOrg) saveToStorage(SOURCES_KEY, sourcesHistory);
+  }, [sourcesHistory, isOrg, sharedHistoryLoaded, SOURCES_KEY]);
 
+  // ── Guard: redirect if no docName ────────────────────────────────────────
+  useEffect(() => {
+    if (!docName) navigate("/dashboard", { replace: true });
+  }, [docName, navigate]);
+
+  // ── Fetch document text ──────────────────────────────────────────────────
+  // FIX: pass orgIdRef.current so org members can fetch text of shared docs.
   useEffect(() => {
     if (!docName || !tokenReady) return;
     const t = setTimeout(async () => {
       try {
-        const res = await getDocumentText(docName, tokenRef.current);
+        const res = await getDocumentText(docName, tokenRef.current, orgIdRef.current);
         setFetchedText(res.text || "");
       } catch {
         setFetchedText("");
@@ -625,7 +641,7 @@ useEffect(() => {
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
 
-
+  // ── Org: members + online presence ───────────────────────────────────────
   useEffect(() => {
     if (!isOrg) return;
     const fetchAll = async () => {
@@ -676,9 +692,13 @@ useEffect(() => {
     setMembers((prev) => prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m));
   };
 
+  // ── Send question ────────────────────────────────────────────────────────
   const send = async () => {
     const question = input.trim();
     if (!question || loading) return;
+
+    // FIX: guard against sending before token/orgId are available
+    if (!tokenReady) return;
 
     const newHistory = [...chatHistory, { role: "user", content: question }];
     setChatHistory(newHistory);
@@ -693,6 +713,10 @@ useEffect(() => {
     setHighlightedPages({});
 
     try {
+      // FIX: pass orgIdRef.current as the last argument so the AI backend
+      // scopes the vector search to the correct org's documents.
+      // Previously null was always passed here — this was the root cause of
+      // invited members seeing no results and no shared chat history.
       await askQuestionStream(
         question,
         docName,
@@ -753,7 +777,7 @@ useEffect(() => {
           setLoading(false);
         },
         3,
-        null
+        orgIdRef.current,   // FIX: was hardcoded null
       );
     } catch (err) {
       setMessages((m) => {
@@ -769,19 +793,19 @@ useEffect(() => {
     }
   };
 
-  const displayText       = docText || fetchedText;
-  const parts             = highlightText(displayText, highlights);
-  const onlineCount       = onlineSet.size;
-  const totalSourceCount  = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
-  const accentBtn         = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
-  const accentFocus       = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
+  const displayText      = docText || fetchedText;
+  const parts            = highlightText(displayText, highlights);
+  const onlineCount      = onlineSet.size;
+  const totalSourceCount = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
+  const accentBtn        = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
+  const accentFocus      = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
       {showInviteModal && tokenReady && (
-      <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
+        <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
       )}
       {showMembersModal && (
         <ManageMembersModal
@@ -881,6 +905,7 @@ useEffect(() => {
               )}
             </div>
           </div>
+
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
             className="flex-1 overflow-y-auto"
@@ -962,17 +987,15 @@ useEffect(() => {
             ) : (
               <div className="px-8 py-6 max-w-prose mx-auto">
                 {displayText ? (
-                  <>
-                    <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
-                      {parts.map((part, i) =>
-                        part.highlight ? (
-                          <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5">{part.text}</mark>
-                        ) : (
-                          <span key={i}>{part.text}</span>
-                        )
-                      )}
-                    </p>
-                  </>
+                  <p className="text-sm text-gray-800 leading-8 whitespace-pre-wrap select-text">
+                    {parts.map((part, i) =>
+                      part.highlight ? (
+                        <mark key={i} style={{ backgroundColor: HIGHLIGHT_COLOR }} className="rounded px-0.5">{part.text}</mark>
+                      ) : (
+                        <span key={i}>{part.text}</span>
+                      )
+                    )}
+                  </p>
                 ) : (
                   <div className="flex flex-col items-center justify-center pt-20 text-center">
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
@@ -1016,6 +1039,7 @@ useEffect(() => {
             pageRefs={pageRefs} onClose={() => setShowSourcesPanel(false)}/>
         )}
 
+        {/* ── Chat panel ────────────────────────────────────────────────────── */}
         <div className="w-96 flex flex-col bg-white flex-shrink-0 border-l border-gray-100">
           <div className={`px-4 py-3 border-b flex-shrink-0 ${isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"}`}>
             <div className="flex items-center justify-between">
@@ -1024,15 +1048,15 @@ useEffect(() => {
                   <p className="text-sm font-semibold text-gray-900">Ask AI</p>
                   <button
                     onClick={() => {
-                    if (isOrg && tokenReady && orgIdRef.current) {
-                    saveSharedChatHistory(docName, [], [], tokenRef.current, orgIdRef.current);
-                   } else {
-                    localStorage.removeItem(CHAT_KEY);
-                    localStorage.removeItem(SOURCES_KEY);
-               }
-                  setMessages([]); setSourcesHistory([]); setChatHistory([]);
-                  setHighlights([]); setHighlightedPages({});
-                  }}
+                      if (isOrg && tokenReady && orgIdRef.current) {
+                        saveSharedChatHistory(docName, [], [], tokenRef.current, orgIdRef.current);
+                      } else {
+                        localStorage.removeItem(CHAT_KEY);
+                        localStorage.removeItem(SOURCES_KEY);
+                      }
+                      setMessages([]); setSourcesHistory([]); setChatHistory([]);
+                      setHighlights([]); setHighlightedPages({});
+                    }}
                     className="text-xs text-gray-400 hover:text-red-400 transition-colors">
                     Clear
                   </button>
@@ -1051,15 +1075,15 @@ useEffect(() => {
 
           <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
             {!sharedHistoryLoaded ? (
-  <div className="flex items-center justify-center mt-10 gap-2 text-gray-400">
-    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24"
-      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-      <path d="M21 12a9 9 0 11-6.219-8.56"/>
-    </svg>
-    <span className="text-xs">Loading shared chat history…</span>
-  </div>
-) : messages.length === 0 && (
-  <div className="text-center mt-10">
+              <div className="flex items-center justify-center mt-10 gap-2 text-gray-400">
+                <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                </svg>
+                <span className="text-xs">Loading shared chat history…</span>
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="text-center mt-10">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 ${isOrg ? "bg-emerald-50" : "bg-blue-50"}`}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                     stroke={isOrg ? "#0F6E56" : "#185FA5"} strokeWidth="2" strokeLinecap="round">
@@ -1072,7 +1096,7 @@ useEffect(() => {
                     : "Ask anything. Matching passages are highlighted automatically."}
                 </p>
               </div>
-            )}
+            ) : null}
 
             {messages.map((msg, i) => (
               <div key={i} className={`flex gap-2 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
@@ -1161,8 +1185,9 @@ useEffect(() => {
               <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
                 placeholder={isOrg ? "Ask about this shared document..." : "Ask about this document..."}
-                className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors ${accentFocus}`}/>
-              <button onClick={send} disabled={!input.trim() || loading}
+                disabled={!tokenReady || (isOrg && !sharedHistoryLoaded)}
+                className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors disabled:opacity-50 ${accentFocus}`}/>
+              <button onClick={send} disabled={!input.trim() || loading || !tokenReady}
                 className={`px-3 rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                   <line x1="22" y1="2" x2="11" y2="13"/>
