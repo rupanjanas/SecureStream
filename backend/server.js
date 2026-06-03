@@ -154,14 +154,18 @@ app.get('/login', checkClientReady, (req, res) => {
   const redirectPath = req.query.redirect || '';
   const inviteMatch  = redirectPath.match(/\/org\/join\/([^/?#]+)/);
 
-  const fullState = inviteMatch ? `${baseState}|inviteToken:${inviteMatch[1]}` : baseState;
+  const fullState = inviteMatch
+    ? `${baseState}|inviteToken:${inviteMatch[1]}`
+    : baseState;
 
+  // FIX: Store nonce and the BASE state (without the invite suffix) so
+  // the callback can verify them correctly.
   req.session.nonce = nonce;
   req.session.state = baseState;
 
   req.session.save((err) => {
     if (err) {
-      console.error('Session save error:', err);
+      console.error('Session save error on /login:', err);
       return res.status(500).send('Session error');
     }
 
@@ -182,18 +186,42 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const rawState = req.query.state || '';
     const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
 
-    if (!req.session.state && baseState) {
-      req.session.state = baseState;
+    // FIX: Read the expected nonce and state strictly from the session.
+    // Never fall back to the request value — that defeats the CSRF protection.
+    const expectedNonce = req.session.nonce;
+    const expectedState = req.session.state;
+
+    // If the session lost the nonce/state (e.g. session not rehydrated),
+    // redirect to login cleanly instead of throwing an unhandled error.
+    if (!expectedNonce || !expectedState) {
+      console.error('[callback] Missing nonce or state in session. Session may not have been rehydrated. Redirecting to login.');
+      return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
-    const params   = client.callbackParams(req);
+    // FIX: openid-client checks state against what we pass here.
+    // We must pass the BASE state (without the invite suffix) because that
+    // is what we stored in the session at login time.
+    const params = client.callbackParams(req);
+
+    // Temporarily override the state param so openid-client validates
+    // against the base state we stored, not the full compound state.
+    // (callbackParams reads req.query.state; we reconstruct params cleanly.)
+    const callbackChecks = {
+      nonce: expectedNonce,
+      state: expectedState,
+      // Pass the base state as the expected value; provide the base state
+      // as the received value so the library comparison passes.
+      // We do this by re-assigning params.state before validation.
+    };
+
+    // Replace the compound state in params with just the base portion
+    // so openid-client's state comparison (params.state === checks.state) passes.
+    params.state = baseState;
+
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
       params,
-      {
-        nonce: req.session.nonce,
-        ...(req.session.state ? { state: req.session.state } : {}),
-      }
+      callbackChecks
     );
 
     const userInfo = await client.userinfo(tokenSet.access_token);
@@ -204,6 +232,8 @@ app.get('/callback', checkClientReady, async (req, res) => {
       id_token:      tokenSet.id_token,
       refresh_token: tokenSet.refresh_token,
     };
+
+    // FIX: Clear nonce and state AFTER successful validation.
     delete req.session.nonce;
     delete req.session.state;
 
