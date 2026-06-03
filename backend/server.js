@@ -9,14 +9,12 @@ const crypto     = require('crypto');
 const { createClient: createRedisClient } = require('redis');
 
 const app = express();
-app.set("trust proxy", 1);
+app.set('trust proxy', 1);
 app.use(express.json());
 
 function inviteExpiresAt(days = 7) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
-
-// ── Supabase ─────────────────────────────────────────────────────────────────
 
 const { createClient } = require('@supabase/supabase-js');
 const supabaseAdmin = createClient(
@@ -24,16 +22,9 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── Redis client ──────────────────────────────────────────────────────────────
-
 const redisClient = createRedisClient({ url: process.env.REDIS_URL });
 redisClient.on('error', (err) => console.error('Redis error:', err));
 redisClient.connect().catch(console.error);
-
-// ── Custom Redis session store (no connect-redis dependency) ──────────────────
-//
-// Implements the full express-session Store interface directly on top of the
-// redis client — eliminates all connect-redis version confusion forever.
 
 class RedisSessionStore extends session.Store {
   constructor(client, ttlSeconds = 7 * 24 * 60 * 60) {
@@ -41,9 +32,7 @@ class RedisSessionStore extends session.Store {
     this.client = client;
     this.ttl    = ttlSeconds;
   }
-
   _key(sid) { return `sess:${sid}`; }
-
   get(sid, cb) {
     this.client.get(this._key(sid))
       .then(data => {
@@ -53,42 +42,28 @@ class RedisSessionStore extends session.Store {
       })
       .catch(cb);
   }
-
   set(sid, sess, cb) {
     let ttl = this.ttl;
-    if (sess && sess.cookie && sess.cookie.expires) {
+    if (sess?.cookie?.expires)
       ttl = Math.max(1, Math.floor((new Date(sess.cookie.expires) - Date.now()) / 1000));
-    }
     this.client.setEx(this._key(sid), ttl, JSON.stringify(sess))
-      .then(() => cb(null))
-      .catch(cb);
+      .then(() => cb(null)).catch(cb);
   }
-
   destroy(sid, cb) {
-    this.client.del(this._key(sid))
-      .then(() => cb(null))
-      .catch(cb);
+    this.client.del(this._key(sid)).then(() => cb(null)).catch(cb);
   }
-
   touch(sid, sess, cb) {
     let ttl = this.ttl;
-    if (sess && sess.cookie && sess.cookie.expires) {
+    if (sess?.cookie?.expires)
       ttl = Math.max(1, Math.floor((new Date(sess.cookie.expires) - Date.now()) / 1000));
-    }
-    this.client.expire(this._key(sid), ttl)
-      .then(() => cb(null))
-      .catch(cb);
+    this.client.expire(this._key(sid), ttl).then(() => cb(null)).catch(cb);
   }
 }
-
-// ── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use(cors({
   origin:      process.env.FRONTEND_URL,
   credentials: true,
 }));
-
-// ── Session ──────────────────────────────────────────────────────────────────
 
 app.use(session({
   store:             new RedisSessionStore(redisClient),
@@ -103,15 +78,13 @@ app.use(session({
   },
 }));
 
-// ── OIDC client ──────────────────────────────────────────────────────────────
-
 let client;
 async function initializeClient() {
   const issuer = await Issuer.discover(process.env.COGNITO_ISSUER_URL);
   client = new issuer.Client({
-    client_id:     process.env.CLIENT_ID,
-    client_secret: process.env.CLIENT_SECRET,
-    redirect_uris: [process.env.REDIRECT_URI],
+    client_id:      process.env.CLIENT_ID,
+    client_secret:  process.env.CLIENT_SECRET,
+    redirect_uris:  [process.env.REDIRECT_URI],
     response_types: ['code'],
   });
 }
@@ -124,12 +97,33 @@ const checkClientReady = (req, res, next) => {
   next();
 };
 
-const checkAuth = (req, res, next) => {
-  req.isAuthenticated = !!req.session.userInfo;
+// FIX: actually rejects unauthenticated requests instead of just setting a flag
+const requireAuth = (req, res, next) => {
+  if (!req.session.userInfo) return res.status(401).json({ error: 'Not authenticated' });
   next();
 };
 
-// ── Helper: extract invite token embedded in state ───────────────────────────
+// FIX: enforces admin role for sensitive org operations
+const requireAdmin = async (req, res, next) => {
+  if (!req.session.userInfo) return res.status(401).json({ error: 'Not authenticated' });
+  const orgId = req.session.orgId;
+  if (!orgId) return res.status(403).json({ error: 'Not in an org' });
+  try {
+    const { data } = await supabaseAdmin
+      .from('org_members')
+      .select('role')
+      .eq('org_id', orgId)
+      .eq('user_sub', req.session.userInfo.sub)
+      .single();
+    if (!data || data.role !== 'admin')
+      return res.status(403).json({ error: 'Admin access required' });
+    next();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function splitState(rawState) {
   if (!rawState) return { baseState: '', inviteToken: null };
@@ -140,8 +134,6 @@ function splitState(rawState) {
     inviteToken: rawState.slice(idx + '|inviteToken:'.length) || null,
   };
 }
-
-// ── Helper: process an invite token after successful login ───────────────────
 
 async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
   try {
@@ -167,28 +159,24 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
         { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
       ];
     } else {
-      console.warn('[invite] Invalid or expired token:', inviteToken, error && error.message);
+      console.warn('[invite] Invalid or expired token:', inviteToken, error?.message);
     }
   } catch (err) {
     console.error('[invite] processInviteAndRedirect error:', err.message);
   }
-
-  return req.session.save(() => {
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
-  });
+  return req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => {
-  if (!req.session.tokens && !req.session.userInfo) {
+  if (!req.session.tokens && !req.session.userInfo)
     return res.json({ isAuthenticated: false });
-  }
   res.json({
     isAuthenticated: true,
-    user:         req.session.userInfo             || null,
-    id_token:     req.session.tokens && req.session.tokens.id_token     || null,
-    access_token: req.session.tokens && req.session.tokens.access_token || null,
+    user:         req.session.userInfo || null,
+    id_token:     req.session.tokens?.id_token     || null,
+    access_token: req.session.tokens?.access_token || null,
     orgId:        req.session.orgId                || null,
     orgName:      req.session.orgName              || null,
     mode:         req.session.mode                 || null,
@@ -216,13 +204,11 @@ app.get('/login', checkClientReady, (req, res) => {
       console.error('Session save error on /login:', err);
       return res.status(500).send('Session error');
     }
-
     const authUrl = client.authorizationUrl({
       scope: 'phone openid email',
       state: fullState,
       nonce,
     });
-
     res.redirect(authUrl);
   });
 });
@@ -238,14 +224,12 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const expectedState = req.session.state;
 
     if (!expectedNonce || !expectedState) {
-      console.error('[callback] Missing nonce or state in session — redirecting to login.');
+      console.error('[callback] Missing nonce or state in session.');
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
-    const params = client.callbackParams(req);
-
-    // Strip the invite suffix so openid-client compares baseState == baseState
-    params.state = baseState;
+    const params   = client.callbackParams(req);
+    params.state   = baseState;   // strip invite suffix before openid-client validates
 
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
@@ -261,7 +245,6 @@ app.get('/callback', checkClientReady, async (req, res) => {
       id_token:      tokenSet.id_token,
       refresh_token: tokenSet.refresh_token,
     };
-
     delete req.session.nonce;
     delete req.session.state;
 
@@ -272,25 +255,17 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     req.session.memberships = memberships || [];
 
-    if (stateInviteToken) {
+    // Invite token was embedded in OIDC state — process it now
+    if (stateInviteToken)
       return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
-    }
 
-    const pendingToken = req.session.pendingInviteToken;
-    if (pendingToken) {
-      delete req.session.pendingInviteToken;
-      return processInviteAndRedirect(req, res, pendingToken, userInfo);
-    }
-
-    if (memberships && memberships.length === 1) {
+    if (memberships?.length === 1) {
       req.session.orgId   = memberships[0].org_id;
-      req.session.orgName = memberships[0].orgs && memberships[0].orgs.name;
+      req.session.orgName = memberships[0].orgs?.name;
       req.session.mode    = 'org';
     }
 
-    req.session.save(() => {
-      res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
-    });
+    req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
 
   } catch (err) {
     console.error('Callback error:', err);
@@ -298,13 +273,12 @@ app.get('/callback', checkClientReady, async (req, res) => {
   }
 });
 
-// ── Refresh token ─────────────────────────────────────────────────────────────
+// ── Refresh ───────────────────────────────────────────────────────────────────
 
-app.post('/refresh', async (req, res) => {
-  const refreshToken = req.session.tokens && req.session.tokens.refresh_token;
-  if (!refreshToken) {
-    return res.status(401).json({ error: "No refresh token — please log in again." });
-  }
+app.post('/refresh', requireAuth, async (req, res) => {
+  const refreshToken = req.session.tokens?.refresh_token;
+  if (!refreshToken)
+    return res.status(401).json({ error: 'No refresh token — please log in again.' });
   try {
     const tokenSet = await client.refresh(refreshToken);
     req.session.tokens = {
@@ -314,25 +288,31 @@ app.post('/refresh', async (req, res) => {
     };
     return req.session.save(() => res.json({ access_token: tokenSet.access_token }));
   } catch (err) {
-    console.error("Token refresh failed:", err.message);
-    return res.status(401).json({ error: "Session expired — please log in again." });
+    console.error('Token refresh failed:', err.message);
+    return res.status(401).json({ error: 'Session expired — please log in again.' });
   }
 });
 
 // ── Org: join via invite link ─────────────────────────────────────────────────
+//
+// FIX: unauthenticated visitors are now redirected to /login on THIS server
+// (relative URL) instead of FRONTEND_URL/login.  This keeps the session cookie
+// on one domain for the entire OAuth round-trip:
+//
+//   /org/join/:token → /login?redirect=... → Cognito → /callback
+//
+// Previously the bounce through the frontend domain caused the nonce/state
+// session to be unreachable at /callback in certain browsers.
 
-app.get('/org/join/:token', async (req, res) => {
+app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const { token } = req.params;
   const user       = req.session.userInfo;
 
   if (!user) {
-    req.session.pendingInviteToken = token;
-    return req.session.save(() => {
-      const loginUrl =
-        `${process.env.FRONTEND_URL}/login` +
-        `?redirect=${encodeURIComponent(`/org/join/${token}`)}`;
-      res.redirect(loginUrl);
-    });
+    // Redirect to the backend's own /login so the session stays on one domain.
+    // /login embeds the invite token in the OIDC state so it survives the
+    // Cognito round-trip without needing any session-stored pendingInviteToken.
+    return res.redirect(`/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`);
   }
 
   const { data: invite, error } = await supabaseAdmin
@@ -341,12 +321,11 @@ app.get('/org/join/:token', async (req, res) => {
     .eq('token', token)
     .single();
 
-  if (error || !invite) {
+  if (error || !invite)
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`);
-  }
-  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+
+  if (invite.expires_at && new Date(invite.expires_at) < new Date())
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
-  }
 
   await supabaseAdmin.from('org_members').upsert({
     org_id:   invite.org_id,
@@ -363,14 +342,12 @@ app.get('/org/join/:token', async (req, res) => {
     { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
   ];
 
-  req.session.save(() => {
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
-  });
+  req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
 });
 
 // ── Org: memberships ──────────────────────────────────────────────────────────
 
-app.get('/org/memberships', checkAuth, (req, res) => {
+app.get('/org/memberships', requireAuth, (req, res) => {
   res.json({
     memberships:    req.session.memberships  || [],
     currentOrgId:   req.session.orgId        || null,
@@ -378,7 +355,7 @@ app.get('/org/memberships', checkAuth, (req, res) => {
   });
 });
 
-app.get('/org/me', checkAuth, (req, res) => {
+app.get('/org/me', requireAuth, (req, res) => {
   res.json({
     orgId:   req.session.orgId   || null,
     orgName: req.session.orgName || null,
@@ -387,7 +364,7 @@ app.get('/org/me', checkAuth, (req, res) => {
 
 // ── Org: select workspace ─────────────────────────────────────────────────────
 
-app.post('/org/select', checkAuth, async (req, res) => {
+app.post('/org/select', requireAuth, async (req, res) => {
   const { orgId, mode } = req.body;
 
   if (mode === 'personal') {
@@ -408,10 +385,10 @@ app.post('/org/select', checkAuth, async (req, res) => {
     if (!data) return res.status(403).json({ error: 'Not a member of this org' });
 
     req.session.orgId   = data.org_id;
-    req.session.orgName = data.orgs && data.orgs.name;
+    req.session.orgName = data.orgs?.name;
     req.session.mode    = 'org';
     return req.session.save(() =>
-      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs && data.orgs.name })
+      res.json({ mode: 'org', orgId: data.org_id, orgName: data.orgs?.name })
     );
   }
 
@@ -420,11 +397,7 @@ app.post('/org/select', checkAuth, async (req, res) => {
 
 // ── Org: create ───────────────────────────────────────────────────────────────
 
-app.post('/org/create', async (req, res) => {
-  if (!req.session || !req.session.userInfo) {
-    return res.status(401).json({ error: "not_authenticated" });
-  }
-
+app.post('/org/create', requireAuth, async (req, res) => {
   const { name } = req.body;
   const user     = req.session.userInfo;
   if (!name) return res.status(400).json({ error: 'Org name required' });
@@ -469,10 +442,8 @@ app.post('/org/create', async (req, res) => {
 
 // ── Org: generate invite link ─────────────────────────────────────────────────
 
-app.post('/org/invite', checkAuth, async (req, res) => {
+app.post('/org/invite', requireAdmin, async (req, res) => {
   const orgId = req.session.orgId;
-  if (!orgId) return res.status(400).json({ error: 'Not in an org' });
-
   const token = uuidv4();
   await supabaseAdmin.from('invite_tokens').insert({
     org_id:     orgId,
@@ -485,27 +456,21 @@ app.post('/org/invite', checkAuth, async (req, res) => {
 
 // ── Org: send invite email ────────────────────────────────────────────────────
 
-app.post('/org/invite/email', checkAuth, async (req, res) => {
+app.post('/org/invite/email', requireAdmin, async (req, res) => {
   const { email, inviteUrl } = req.body;
   const orgName    = req.session.orgName                    || 'SecureStream';
-  const senderName = req.session.userInfo && req.session.userInfo.given_name || 'A teammate';
+  const senderName = req.session.userInfo?.given_name       || 'A teammate';
 
-  if (!email || !inviteUrl) {
+  if (!email || !inviteUrl)
     return res.status(400).json({ error: 'Email and inviteUrl required' });
-  }
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
     return res.status(500).json({ error: 'Email not configured on server' });
-  }
 
   try {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
     });
-
     const info = await transporter.sendMail({
       from:    `"SecureStream" <${process.env.EMAIL_USER}>`,
       to:      email,
@@ -531,9 +496,9 @@ app.post('/org/invite/email', checkAuth, async (req, res) => {
   }
 });
 
-// ── Org: members ─────────────────────────────────────────────────────────────
+// ── Org: members ──────────────────────────────────────────────────────────────
 
-app.get('/org/members', checkAuth, async (req, res) => {
+app.get('/org/members', requireAuth, async (req, res) => {
   const orgId = req.session.orgId;
   if (!orgId) return res.json({ members: [] });
   try {
@@ -548,10 +513,26 @@ app.get('/org/members', checkAuth, async (req, res) => {
   }
 });
 
-app.delete('/org/members/:user_sub', checkAuth, async (req, res) => {
-  const orgId   = req.session.orgId;
+// FIX: admins can remove anyone; members can only remove themselves (leave)
+app.delete('/org/members/:user_sub', requireAuth, async (req, res) => {
+  const orgId        = req.session.orgId;
   const { user_sub } = req.params;
+  const requestorSub = req.session.userInfo.sub;
+
   if (!orgId) return res.status(400).json({ error: 'Not in an org' });
+
+  const { data: requestor } = await supabaseAdmin
+    .from('org_members')
+    .select('role')
+    .eq('org_id', orgId)
+    .eq('user_sub', requestorSub)
+    .single();
+
+  if (!requestor) return res.status(403).json({ error: 'Not a member of this org' });
+
+  if (user_sub !== requestorSub && requestor.role !== 'admin')
+    return res.status(403).json({ error: 'Admin access required to remove other members' });
+
   try {
     await supabaseAdmin
       .from('org_members')
@@ -564,14 +545,13 @@ app.delete('/org/members/:user_sub', checkAuth, async (req, res) => {
   }
 });
 
-app.patch('/org/members/:user_sub/role', checkAuth, async (req, res) => {
-  const orgId   = req.session.orgId;
+// FIX: role changes require admin
+app.patch('/org/members/:user_sub/role', requireAdmin, async (req, res) => {
+  const orgId        = req.session.orgId;
   const { user_sub } = req.params;
   const { role }     = req.body;
-  if (!orgId) return res.status(400).json({ error: 'Not in an org' });
-  if (!['admin', 'member', 'viewer'].includes(role)) {
+  if (!['admin', 'member', 'viewer'].includes(role))
     return res.status(400).json({ error: 'Invalid role' });
-  }
   try {
     const { data, error } = await supabaseAdmin
       .from('org_members')
@@ -589,7 +569,7 @@ app.patch('/org/members/:user_sub/role', checkAuth, async (req, res) => {
 
 // ── Org: online presence ──────────────────────────────────────────────────────
 
-app.get('/org/online', checkAuth, async (req, res) => {
+app.get('/org/online', requireAuth, async (req, res) => {
   const orgId = req.session.orgId;
   if (!orgId) return res.json({ online: [] });
   try {
@@ -606,10 +586,10 @@ app.get('/org/online', checkAuth, async (req, res) => {
   }
 });
 
-app.post('/org/presence', checkAuth, async (req, res) => {
+app.post('/org/presence', requireAuth, async (req, res) => {
   const user  = req.session.userInfo;
   const orgId = req.session.orgId;
-  if (!user || !orgId) return res.json({ ok: false });
+  if (!orgId) return res.json({ ok: false });
   try {
     await supabaseAdmin
       .from('user_presence')
@@ -637,8 +617,6 @@ app.get('/logout', (req, res) => {
     res.redirect(logoutUrl);
   });
 });
-
-// ── Start ─────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
