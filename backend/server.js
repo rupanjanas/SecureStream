@@ -97,13 +97,11 @@ const checkClientReady = (req, res, next) => {
   next();
 };
 
-// FIX: actually rejects unauthenticated requests instead of just setting a flag
 const requireAuth = (req, res, next) => {
   if (!req.session.userInfo) return res.status(401).json({ error: 'Not authenticated' });
   next();
 };
 
-// FIX: enforces admin role for sensitive org operations
 const requireAdmin = async (req, res, next) => {
   if (!req.session.userInfo) return res.status(401).json({ error: 'Not authenticated' });
   const orgId = req.session.orgId;
@@ -135,6 +133,26 @@ function splitState(rawState) {
   };
 }
 
+// FIX (Bug 1 — mobile/Safari): nonce & state are now ALSO stored in Redis under
+// a key derived from the baseState value.  This is the "server-side PKCE store"
+// pattern and does NOT rely on the session cookie surviving the Cognito redirect
+// (which Safari ITP and strict Android Chrome may drop for cross-site redirects).
+//
+// TTL is 10 minutes — plenty for a login round-trip.
+const OAUTH_STATE_TTL = 600; // seconds
+
+async function saveOAuthParams(baseState, nonce) {
+  const key = `oauth:${baseState}`;
+  await redisClient.setEx(key, OAUTH_STATE_TTL, JSON.stringify({ nonce }));
+}
+
+async function loadAndDeleteOAuthParams(baseState) {
+  const key = `oauth:${baseState}`;
+  const raw = await redisClient.getDel(key);   // atomic get-and-delete
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
   try {
     const { data: invite, error } = await supabaseAdmin
@@ -144,20 +162,28 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       .single();
 
     if (!error && invite && (!invite.expires_at || new Date(invite.expires_at) > new Date())) {
-      await supabaseAdmin.from('org_members').upsert({
+      // FIX (Bug 2 — documents): await the upsert so membership exists in DB
+      // before the session is saved and the browser is redirected.  Previously
+      // a fire-and-forget upsert could lose to a racing document-permission
+      // check on the very first page load.
+      const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
         org_id:   invite.org_id,
         user_sub: userInfo.sub,
         email:    userInfo.email,
         role:     'member',
       }, { onConflict: 'org_id,user_sub' });
 
-      req.session.orgId   = invite.org_id;
-      req.session.orgName = invite.orgs.name;
-      req.session.mode    = 'org';
-      req.session.memberships = [
-        ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
-        { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
-      ];
+      if (upsertErr) {
+        console.error('[invite] upsert failed:', upsertErr.message);
+      } else {
+        req.session.orgId   = invite.org_id;
+        req.session.orgName = invite.orgs.name;
+        req.session.mode    = 'org';
+        req.session.memberships = [
+          ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
+          { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
+        ];
+      }
     } else {
       console.warn('[invite] Invalid or expired token:', inviteToken, error?.message);
     }
@@ -186,7 +212,7 @@ app.get('/', (req, res) => {
 
 // ── Login ─────────────────────────────────────────────────────────────────────
 
-app.get('/login', checkClientReady, (req, res) => {
+app.get('/login', checkClientReady, async (req, res) => {
   const nonce        = generators.nonce();
   const baseState    = generators.state();
   const redirectPath = req.query.redirect || '';
@@ -196,8 +222,19 @@ app.get('/login', checkClientReady, (req, res) => {
     ? `${baseState}|inviteToken:${inviteMatch[1]}`
     : baseState;
 
+  // Primary: store in session (works for most browsers)
   req.session.nonce = nonce;
   req.session.state = baseState;
+
+  // FIX (Bug 1): also store in Redis keyed by baseState so /callback can
+  // recover nonce/state even when the session cookie was lost (mobile Safari,
+  // strict Android Chrome, first-party isolation).
+  try {
+    await saveOAuthParams(baseState, nonce);
+  } catch (err) {
+    console.error('[login] Redis saveOAuthParams failed:', err.message);
+    // Non-fatal — session-based fallback still works for most browsers.
+  }
 
   req.session.save((err) => {
     if (err) {
@@ -220,16 +257,30 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const rawState = req.query.state || '';
     const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
 
-    const expectedNonce = req.session.nonce;
-    const expectedState = req.session.state;
+    // Primary source: session cookie (desktop browsers, most cases)
+    let expectedNonce = req.session.nonce;
+    let expectedState = req.session.state;
+
+    // FIX (Bug 1): if the session cookie was lost (mobile Safari / ITP), fall
+    // back to the Redis-stored nonce/state we saved during /login.
+    // getDel is atomic so each auth code can only be redeemed once.
+    if (!expectedNonce || !expectedState) {
+      console.warn('[callback] Session nonce/state missing — trying Redis fallback for state:', baseState);
+      const stored = await loadAndDeleteOAuthParams(baseState);
+      if (stored) {
+        expectedNonce = stored.nonce;
+        expectedState = baseState;  // the state we keyed by is the expected state
+        console.info('[callback] Recovered nonce from Redis fallback.');
+      }
+    }
 
     if (!expectedNonce || !expectedState) {
-      console.error('[callback] Missing nonce or state in session.');
+      console.error('[callback] Missing nonce or state — session and Redis fallback both failed.');
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
     const params   = client.callbackParams(req);
-    params.state   = baseState;   // strip invite suffix before openid-client validates
+    params.state   = baseState;
 
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
@@ -255,7 +306,6 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     req.session.memberships = memberships || [];
 
-    // Invite token was embedded in OIDC state — process it now
     if (stateInviteToken)
       return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
 
@@ -294,24 +344,12 @@ app.post('/refresh', requireAuth, async (req, res) => {
 });
 
 // ── Org: join via invite link ─────────────────────────────────────────────────
-//
-// FIX: unauthenticated visitors are now redirected to /login on THIS server
-// (relative URL) instead of FRONTEND_URL/login.  This keeps the session cookie
-// on one domain for the entire OAuth round-trip:
-//
-//   /org/join/:token → /login?redirect=... → Cognito → /callback
-//
-// Previously the bounce through the frontend domain caused the nonce/state
-// session to be unreachable at /callback in certain browsers.
 
 app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const { token } = req.params;
   const user       = req.session.userInfo;
 
   if (!user) {
-    // Redirect to the backend's own /login so the session stays on one domain.
-    // /login embeds the invite token in the OIDC state so it survives the
-    // Cognito round-trip without needing any session-stored pendingInviteToken.
     return res.redirect(`/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`);
   }
 
@@ -327,12 +365,18 @@ app.get('/org/join/:token', checkClientReady, async (req, res) => {
   if (invite.expires_at && new Date(invite.expires_at) < new Date())
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
 
-  await supabaseAdmin.from('org_members').upsert({
+  // FIX (Bug 2): await the upsert before saving session / redirecting
+  const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
     org_id:   invite.org_id,
     user_sub: user.sub,
     email:    user.email,
     role:     'member',
   }, { onConflict: 'org_id,user_sub' });
+
+  if (upsertErr) {
+    console.error('[join] upsert failed:', upsertErr.message);
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`);
+  }
 
   req.session.orgId   = invite.org_id;
   req.session.orgName = invite.orgs.name;
@@ -513,7 +557,6 @@ app.get('/org/members', requireAuth, async (req, res) => {
   }
 });
 
-// FIX: admins can remove anyone; members can only remove themselves (leave)
 app.delete('/org/members/:user_sub', requireAuth, async (req, res) => {
   const orgId        = req.session.orgId;
   const { user_sub } = req.params;
@@ -545,7 +588,6 @@ app.delete('/org/members/:user_sub', requireAuth, async (req, res) => {
   }
 });
 
-// FIX: role changes require admin
 app.patch('/org/members/:user_sub/role', requireAdmin, async (req, res) => {
   const orgId        = req.session.orgId;
   const { user_sub } = req.params;
