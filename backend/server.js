@@ -26,6 +26,8 @@ const redisClient = createRedisClient({ url: process.env.REDIS_URL });
 redisClient.on('error', (err) => console.error('Redis error:', err));
 redisClient.connect().catch(console.error);
 
+// ── Redis session store ───────────────────────────────────────────────────────
+
 class RedisSessionStore extends session.Store {
   constructor(client, ttlSeconds = 7 * 24 * 60 * 60) {
     super();
@@ -78,6 +80,8 @@ app.use(session({
   },
 }));
 
+// ── OIDC client ───────────────────────────────────────────────────────────────
+
 let client;
 async function initializeClient() {
   const issuer = await Issuer.discover(process.env.COGNITO_ISSUER_URL);
@@ -121,7 +125,11 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── OAuth state helpers ───────────────────────────────────────────────────────
+// Store nonce+state in Redis keyed by baseState so /callback can recover them
+// even when Safari ITP or strict Android Chrome drops the session cookie.
+
+const OAUTH_STATE_TTL = 600; // 10 minutes
 
 function splitState(rawState) {
   if (!rawState) return { baseState: '', inviteToken: null };
@@ -133,25 +141,17 @@ function splitState(rawState) {
   };
 }
 
-// FIX (Bug 1 — mobile/Safari): nonce & state are now ALSO stored in Redis under
-// a key derived from the baseState value.  This is the "server-side PKCE store"
-// pattern and does NOT rely on the session cookie surviving the Cognito redirect
-// (which Safari ITP and strict Android Chrome may drop for cross-site redirects).
-//
-// TTL is 10 minutes — plenty for a login round-trip.
-const OAUTH_STATE_TTL = 600; // seconds
-
 async function saveOAuthParams(baseState, nonce) {
-  const key = `oauth:${baseState}`;
-  await redisClient.setEx(key, OAUTH_STATE_TTL, JSON.stringify({ nonce }));
+  await redisClient.setEx(`oauth:${baseState}`, OAUTH_STATE_TTL, JSON.stringify({ nonce }));
 }
 
 async function loadAndDeleteOAuthParams(baseState) {
-  const key = `oauth:${baseState}`;
-  const raw = await redisClient.getDel(key);   // atomic get-and-delete
+  const raw = await redisClient.getDel(`oauth:${baseState}`);
   if (!raw) return null;
   try { return JSON.parse(raw); } catch { return null; }
 }
+
+// ── Invite helper ─────────────────────────────────────────────────────────────
 
 async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
   try {
@@ -162,10 +162,6 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       .single();
 
     if (!error && invite && (!invite.expires_at || new Date(invite.expires_at) > new Date())) {
-      // FIX (Bug 2 — documents): await the upsert so membership exists in DB
-      // before the session is saved and the browser is redirected.  Previously
-      // a fire-and-forget upsert could lose to a racing document-permission
-      // check on the very first page load.
       const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
         org_id:   invite.org_id,
         user_sub: userInfo.sub,
@@ -186,6 +182,9 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       }
     } else {
       console.warn('[invite] Invalid or expired token:', inviteToken, error?.message);
+      return req.session.save(() =>
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`)
+      );
     }
   } catch (err) {
     console.error('[invite] processInviteAndRedirect error:', err.message);
@@ -215,6 +214,8 @@ app.get('/', (req, res) => {
 app.get('/login', checkClientReady, async (req, res) => {
   const nonce        = generators.nonce();
   const baseState    = generators.state();
+
+  // FIX: read req.query.redirect (not returnTo — JoinPage now uses redirect=)
   const redirectPath = req.query.redirect || '';
   const inviteMatch  = redirectPath.match(/\/org\/join\/([^/?#]+)/);
 
@@ -222,18 +223,13 @@ app.get('/login', checkClientReady, async (req, res) => {
     ? `${baseState}|inviteToken:${inviteMatch[1]}`
     : baseState;
 
-  // Primary: store in session (works for most browsers)
   req.session.nonce = nonce;
   req.session.state = baseState;
 
-  // FIX (Bug 1): also store in Redis keyed by baseState so /callback can
-  // recover nonce/state even when the session cookie was lost (mobile Safari,
-  // strict Android Chrome, first-party isolation).
   try {
     await saveOAuthParams(baseState, nonce);
   } catch (err) {
     console.error('[login] Redis saveOAuthParams failed:', err.message);
-    // Non-fatal — session-based fallback still works for most browsers.
   }
 
   req.session.save((err) => {
@@ -257,25 +253,20 @@ app.get('/callback', checkClientReady, async (req, res) => {
     const rawState = req.query.state || '';
     const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
 
-    // Primary source: session cookie (desktop browsers, most cases)
     let expectedNonce = req.session.nonce;
     let expectedState = req.session.state;
 
-    // FIX (Bug 1): if the session cookie was lost (mobile Safari / ITP), fall
-    // back to the Redis-stored nonce/state we saved during /login.
-    // getDel is atomic so each auth code can only be redeemed once.
     if (!expectedNonce || !expectedState) {
-      console.warn('[callback] Session nonce/state missing — trying Redis fallback for state:', baseState);
+      console.warn('[callback] Session nonce/state missing — trying Redis fallback');
       const stored = await loadAndDeleteOAuthParams(baseState);
       if (stored) {
         expectedNonce = stored.nonce;
-        expectedState = baseState;  // the state we keyed by is the expected state
-        console.info('[callback] Recovered nonce from Redis fallback.');
+        expectedState = baseState;
       }
     }
 
     if (!expectedNonce || !expectedState) {
-      console.error('[callback] Missing nonce or state — session and Redis fallback both failed.');
+      console.error('[callback] Missing nonce and state — both session and Redis failed');
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
@@ -344,11 +335,14 @@ app.post('/refresh', requireAuth, async (req, res) => {
 });
 
 // ── Org: join via invite link ─────────────────────────────────────────────────
+// This route is the ACTUAL join handler — JoinPage.jsx redirects here after
+// confirming the user is logged in.
 
 app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const { token } = req.params;
-  const user       = req.session.userInfo;
+  const user      = req.session.userInfo;
 
+  // Not logged in — redirect to login with the invite path baked into state
   if (!user) {
     return res.redirect(`/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`);
   }
@@ -365,7 +359,6 @@ app.get('/org/join/:token', checkClientReady, async (req, res) => {
   if (invite.expires_at && new Date(invite.expires_at) < new Date())
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
 
-  // FIX (Bug 2): await the upsert before saving session / redirecting
   const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
     org_id:   invite.org_id,
     user_sub: user.sub,
@@ -495,6 +488,7 @@ app.post('/org/invite', requireAdmin, async (req, res) => {
     created_by: req.session.userInfo.sub,
     expires_at: inviteExpiresAt(7),
   });
+  // inviteUrl points to FRONTEND /org/join/:token — JoinPage handles the rest
   res.json({ inviteUrl: `${process.env.FRONTEND_URL}/org/join/${token}` });
 });
 
@@ -502,8 +496,8 @@ app.post('/org/invite', requireAdmin, async (req, res) => {
 
 app.post('/org/invite/email', requireAdmin, async (req, res) => {
   const { email, inviteUrl } = req.body;
-  const orgName    = req.session.orgName                    || 'SecureStream';
-  const senderName = req.session.userInfo?.given_name       || 'A teammate';
+  const orgName    = req.session.orgName              || 'SecureStream';
+  const senderName = req.session.userInfo?.given_name || 'A teammate';
 
   if (!email || !inviteUrl)
     return res.status(400).json({ error: 'Email and inviteUrl required' });
@@ -577,11 +571,8 @@ app.delete('/org/members/:user_sub', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'Admin access required to remove other members' });
 
   try {
-    await supabaseAdmin
-      .from('org_members')
-      .delete()
-      .eq('org_id', orgId)
-      .eq('user_sub', user_sub);
+    await supabaseAdmin.from('org_members').delete()
+      .eq('org_id', orgId).eq('user_sub', user_sub);
     res.json({ removed: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -633,14 +624,12 @@ app.post('/org/presence', requireAuth, async (req, res) => {
   const orgId = req.session.orgId;
   if (!orgId) return res.json({ ok: false });
   try {
-    await supabaseAdmin
-      .from('user_presence')
-      .upsert({
-        user_sub:  user.sub,
-        org_id:    orgId,
-        email:     user.email,
-        last_seen: new Date().toISOString(),
-      }, { onConflict: 'user_sub' });
+    await supabaseAdmin.from('user_presence').upsert({
+      user_sub:  user.sub,
+      org_id:    orgId,
+      email:     user.email,
+      last_seen: new Date().toISOString(),
+    }, { onConflict: 'user_sub' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

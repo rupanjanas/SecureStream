@@ -19,7 +19,10 @@ from starlette.responses import StreamingResponse
 
 from app.auth import verify_token
 from app.config import settings
-from app.db import close_http, db_get, db_insert, db_patch, db_test, db_upsert
+from app.db import (
+    close_http, db_get, db_insert, db_patch, db_test, db_upsert,
+    db_verify_org_membership,
+)
 from app.ingest import ingest_document
 from app.models import IngestResponse, QueryRequest
 from app.query import RAG_PROMPT, build_context, retrieve, save_query_log
@@ -33,13 +36,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
-    await close_http()   # gracefully close the shared httpx connection pool
+    await close_http()
 
 
 app = FastAPI(title="SecureStream AI Service", version="4.0.0", lifespan=lifespan)
-
-
-# ── CORS ──────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,8 +49,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ── Security headers ──────────────────────────────────────────────────────────
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -89,7 +87,6 @@ async def rate_limit_middleware(request: Request, call_next):
         except Exception:
             pass
 
-    # Bucket unauthenticated requests by IP — not a shared "anonymous" key
     if user_id == "anonymous":
         forwarded = request.headers.get("X-Forwarded-For", "")
         ip        = forwarded.split(",")[0].strip() if forwarded else (
@@ -116,7 +113,7 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Org ID resolution ─────────────────────────────────────────────────────────
 
 class ChatHistoryBody(BaseModel):
     doc_name: str
@@ -124,14 +121,49 @@ class ChatHistoryBody(BaseModel):
     sources:  list[Any]
 
 
-def resolve_org_id(claims: dict) -> str:
+async def resolve_org_id(
+    claims:   dict,
+    x_org_id: str = "",
+) -> str:
     """
-    Org ID always comes from the VERIFIED JWT sub claim.
-    The X-Org-Id header is ignored — a client cannot forge their own org_id.
-    If you need per-org admin routing, add a custom:org_id claim to the
-    Cognito token and read it here: claims.get("custom:org_id") or claims["sub"].
+    Determine the effective org_id for this request.
+
+    BUG FIX — org/personal separation:
+    The previous implementation either:
+      (a) always used JWT sub — so org docs were stored under user.sub and
+          appeared in personal workspace too, OR
+      (b) blindly trusted X-Org-Id header — any caller could forge it
+
+    CORRECT APPROACH:
+    - If X-Org-Id header is present AND non-empty:
+        Validate the user is actually a member of that org in Supabase.
+        If yes → use the org_id (documents scoped to the org).
+        If no  → reject with 403 (user is not a member of claimed org).
+    - If X-Org-Id header is absent or empty:
+        Use JWT sub → personal workspace.
+
+    This is secure because:
+      1. JWT is verified before this function is called (verify_token runs first)
+      2. org membership is cross-checked against the database
+      3. A forged X-Org-Id will fail the membership check
     """
-    return claims.get("sub", "").strip()
+    user_sub = claims.get("sub", "").strip()
+    if not user_sub:
+        raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
+
+    candidate_org = x_org_id.strip()
+    if not candidate_org:
+        # No org header → personal workspace
+        return user_sub
+
+    # Validate membership before trusting the header
+    is_member = await db_verify_org_membership(user_sub, candidate_org)
+    if not is_member:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not a member of the specified organisation",
+        )
+    return candidate_org
 
 
 ALLOWED_MIME = {"application/pdf", "text/plain"}
@@ -151,10 +183,9 @@ async def ingest(
     file:     UploadFile = File(...),
     claims:   dict       = Depends(verify_token),
     x_domain: str        = Header(default="general"),
+    x_org_id: str        = Header(default=""),
 ):
-    org_id = resolve_org_id(claims)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id resolved from token")
+    org_id = await resolve_org_id(claims, x_org_id)
 
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
@@ -166,8 +197,7 @@ async def ingest(
     safe_filename = os.path.basename(file.filename or "upload").replace("..", "")
     result = await ingest_document(file_bytes, safe_filename, org_id, domain=x_domain)
 
-    # Surface ingest errors as HTTP 422 so the client knows the file wasn't stored
-    if result["chunks_stored"] == 0 and result["message"] != "No content extracted":
+    if result["chunks_stored"] == 0 and result["message"] not in ("No content extracted",):
         raise HTTPException(status_code=422, detail=result["message"])
 
     return result
@@ -175,13 +205,11 @@ async def ingest(
 
 @app.post("/query/stream")
 async def query_stream(
-    body:   QueryRequest,
-    claims: dict = Depends(verify_token),
+    body:     QueryRequest,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
 ):
-    org_id = resolve_org_id(claims)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="No org_id resolved from token")
-
+    org_id = await resolve_org_id(claims, x_org_id)
     logger.info("[SSE] question=%r org=%s doc=%r", body.question, org_id, body.doc_name)
 
     combined = await retrieve(
@@ -215,7 +243,6 @@ async def query_stream(
     async def stream_groq():
         full_answer: list[str] = []
         try:
-            # Streaming requires its own client context — cannot reuse pool client here
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
                 async with client.stream(
                     "POST",
@@ -247,7 +274,9 @@ async def query_stream(
             yield f"data: {json.dumps({'token': f'Error: {exc}', 'done': False})}\n\n"
 
         yield f"data: {json.dumps({'done': True, 'sources': unique_sources, 'source_passages': source_passages})}\n\n"
-        asyncio.create_task(save_query_log(org_id, body.question, "".join(full_answer), source_passages))
+        asyncio.create_task(
+            save_query_log(org_id, body.question, "".join(full_answer), source_passages)
+        )
 
     return StreamingResponse(
         stream_groq(),
@@ -257,8 +286,11 @@ async def query_stream(
 
 
 @app.get("/documents")
-async def list_documents(claims: dict = Depends(verify_token)):
-    org_id = resolve_org_id(claims)
+async def list_documents(
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = await resolve_org_id(claims, x_org_id)
     data   = await db_get("documents", {
         "org_id": f"eq.{org_id}",
         "select": "doc_name,created_at,metadata,file_url",
@@ -275,8 +307,6 @@ async def list_documents(claims: dict = Depends(verify_token)):
                 "doc_name":   name,
                 "created_at": d.get("created_at"),
                 "chunks":     meta.get("total_chunks", 0),
-                # FIX: fall back to metadata.file_url for rows ingested before
-                # the top-level file_url column was added
                 "file_url":   d.get("file_url") or meta.get("file_url"),
                 "domain":     meta.get("domain", "general"),
             })
@@ -284,8 +314,12 @@ async def list_documents(claims: dict = Depends(verify_token)):
 
 
 @app.get("/documents/file-url")
-async def get_document_file_url(doc_name: str, claims: dict = Depends(verify_token)):
-    org_id = resolve_org_id(claims)
+async def get_document_file_url(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = await resolve_org_id(claims, x_org_id)
     rows   = await db_get("documents", {
         "org_id":   f"eq.{org_id}",
         "doc_name": f"eq.{doc_name}",
@@ -303,17 +337,13 @@ async def get_document_file_url(doc_name: str, claims: dict = Depends(verify_tok
 
 @app.get("/documents/{doc_name}/text")
 async def get_document_text(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-    page:     int  = 1,
-    page_size: int = 50,
+    doc_name:  str,
+    claims:    dict = Depends(verify_token),
+    x_org_id:  str  = Header(default=""),
+    page:      int  = 1,
+    page_size: int  = 50,
 ):
-    """
-    Returns document text as reconstructed from stored chunks.
-    Paginated (page / page_size) to avoid pulling thousands of rows at once.
-    """
-    org_id = resolve_org_id(claims)
-    # Fetch all chunk metadata to sort correctly, then paginate
+    org_id = await resolve_org_id(claims, x_org_id)
     chunks = await db_get("documents", {
         "org_id":   f"eq.{org_id}",
         "doc_name": f"eq.{doc_name}",
@@ -333,8 +363,12 @@ async def get_document_text(
 
 
 @app.get("/chat-history/{doc_name}")
-async def get_chat_history(doc_name: str, claims: dict = Depends(verify_token)):
-    org_id = resolve_org_id(claims)
+async def get_chat_history(
+    doc_name: str,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
+):
+    org_id = await resolve_org_id(claims, x_org_id)
     try:
         data = await db_get("chat_history", {
             "org_id":   f"eq.{org_id}",
@@ -354,10 +388,11 @@ async def get_chat_history(doc_name: str, claims: dict = Depends(verify_token)):
 
 @app.post("/chat-history")
 async def save_chat_history(
-    body:   ChatHistoryBody,
-    claims: dict = Depends(verify_token),
+    body:     ChatHistoryBody,
+    claims:   dict = Depends(verify_token),
+    x_org_id: str  = Header(default=""),
 ):
-    org_id  = resolve_org_id(claims)
+    org_id  = await resolve_org_id(claims, x_org_id)
     now_iso = datetime.now(timezone.utc).isoformat()
     payload = {
         "messages":   body.messages,

@@ -22,7 +22,6 @@ HEADERS: dict[str, str] = {
 
 BASE: str = settings.supabase_url
 
-# Strip PostgREST ilike metacharacters from user-supplied keywords
 _UNSAFE_ILIKE_RE = re.compile(r"[*%?\\]")
 
 _http: Optional[httpx.AsyncClient] = None
@@ -64,11 +63,6 @@ async def db_insert(table: str, rows: list[dict]) -> list[dict]:
 
 
 async def db_upsert(table: str, rows: list[dict], on_conflict: str) -> list[dict]:
-    """
-    Idempotent insert using PostgREST on-conflict merge.
-    on_conflict: comma-separated columns that form the unique key.
-    Requires a UNIQUE constraint on those columns in Supabase.
-    """
     if not rows:
         return []
     headers = _merge_headers({"Prefer": "resolution=merge-duplicates,return=representation"})
@@ -124,6 +118,27 @@ async def db_test() -> dict:
     except Exception as exc:
         logger.exception("db_test failed")
         return {"ok": False, "status_code": 0, "error": str(exc)}
+
+
+async def db_verify_org_membership(user_sub: str, org_id: str) -> bool:
+    """
+    Returns True if user_sub is an active member of org_id in the org_members table.
+
+    Called by resolve_org_id() before trusting the X-Org-Id header.
+    This prevents a user from querying or uploading to an org they don't belong to
+    by forging the X-Org-Id header.
+    """
+    try:
+        rows = await db_get("org_members", {
+            "org_id":   f"eq.{org_id}",
+            "user_sub": f"eq.{user_sub}",
+            "select":   "org_id",
+            "limit":    "1",
+        })
+        return len(rows) > 0
+    except Exception:
+        logger.exception("db_verify_org_membership error sub=%s org=%s", user_sub, org_id)
+        return False
 
 
 async def db_keyword_search(
