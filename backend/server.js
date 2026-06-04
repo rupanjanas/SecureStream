@@ -293,35 +293,57 @@ app.get('/', (req, res) => {
 // ── Login ─────────────────────────────────────────────────────────────────────
 
 app.get('/login', checkClientReady, async (req, res) => {
-  const nonce        = generators.nonce();
-  const baseState    = generators.state();
+  const nonce = generators.nonce();
+  const baseState = generators.state();
 
   const redirectPath = req.query.redirect || '';
-  const inviteMatch  = redirectPath.match(/\/org\/join\/([^/?#]+)/);
+
+  console.log('================ LOGIN START ================');
+  console.log('[login] redirectPath:', redirectPath);
+  console.log('[login] query:', req.query);
+
+  const inviteMatch = redirectPath.match(/\/org\/join\/([^/?#]+)/);
+
+  console.log('[login] inviteMatch:', inviteMatch);
 
   const fullState = inviteMatch
     ? `${baseState}|inviteToken:${inviteMatch[1]}`
     : baseState;
 
+  console.log('[login] baseState:', baseState);
+  console.log('[login] fullState:', fullState);
+  console.log('[login] inviteToken:', inviteMatch?.[1] || null);
+
   req.session.nonce = nonce;
   req.session.state = baseState;
 
+  console.log('[login] sessionID:', req.sessionID);
+  console.log('[login] nonce:', nonce);
+
   try {
     await saveOAuthParams(baseState, nonce);
+    console.log('[login] OAuth params saved to Redis');
   } catch (err) {
     console.error('[login] Redis saveOAuthParams failed:', err.message);
   }
 
   req.session.save((err) => {
     if (err) {
-      console.error('Session save error on /login:', err);
+      console.error('[login] Session save error:', err);
       return res.status(500).send('Session error');
     }
+
+    console.log('[login] Session saved successfully');
+
     const authUrl = client.authorizationUrl({
       scope: 'phone openid email',
       state: fullState,
       nonce,
     });
+
+    console.log('[login] authUrl:', authUrl);
+    console.log('================ LOGIN END ================');
+
     res.redirect(authUrl);
   });
 });
