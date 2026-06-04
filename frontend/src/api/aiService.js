@@ -72,7 +72,9 @@ export async function uploadDocument(file, token, orgId = null) {
   formData.append("file", file);
 
   const headers = { Authorization: `Bearer ${token}` };
-  if (orgId) headers["X-Org-Id"] = orgId;
+  if (orgId && typeof orgId === "string" && orgId.trim()) {
+    headers["X-Org-Id"] = orgId.trim();
+  }
 
   const res = await fetch(`${AI_URL}/ingest`, {
     method:  "POST",
@@ -96,7 +98,10 @@ export async function listDocuments(token, orgId = null) {
   if (!token) return { documents: [] };
 
   const headers = { Authorization: `Bearer ${token}` };
-  if (orgId) headers["X-Org-Id"] = orgId;
+  // FIX: Same guard as uploadDocument — only set header for real org IDs.
+  if (orgId && typeof orgId === "string" && orgId.trim()) {
+    headers["X-Org-Id"] = orgId.trim();
+  }
 
   const res = await fetch(`${AI_URL}/documents`, {
     headers,
@@ -115,7 +120,9 @@ export async function getDocumentText(docName, token, orgId = null) {
   if (!token || !docName) return { text: "" };
 
   const headers = { Authorization: `Bearer ${token}` };
-  if (orgId) headers["X-Org-Id"] = orgId;
+  if (orgId && typeof orgId === "string" && orgId.trim()) {
+    headers["X-Org-Id"] = orgId.trim();
+  }
 
   const res = await fetch(
     `${AI_URL}/documents/${encodeURIComponent(docName)}/text`,
@@ -134,7 +141,7 @@ export async function askQuestionStream(
   onToken,
   onDone,
   topK  = 5,
-  orgId = null,   // FIX: callers must pass orgId; null means personal workspace
+  orgId = null,
 ) {
   const token = await getFreshToken();
   if (!token) throw new Error("Session expired — please log in again.");
@@ -143,9 +150,9 @@ export async function askQuestionStream(
     "Content-Type": "application/json",
     Authorization:  `Bearer ${token}`,
   };
-  // FIX: only add the header when orgId is a real value — prevents the backend
-  // from interpreting "null" (stringified) as an org ID.
-  if (orgId) headers["X-Org-Id"] = orgId;
+  if (orgId && typeof orgId === "string" && orgId.trim()) {
+    headers["X-Org-Id"] = orgId.trim();
+  }
 
   const res = await fetch(`${AI_URL}/query/stream`, {
     method:  "POST",
@@ -191,7 +198,6 @@ export async function askQuestionStream(
 
 // ── Shared Chat History ────────────────────────────────────────────────────────
 // Stored in Supabase per (org_id, doc_name) so all org members see the same
-// history. orgId must be the actual UUID from the session, not the org name.
 
 export async function getSharedChatHistory(docName, token, orgId) {
   if (!token || !docName || !orgId) return { messages: [], sources: [] };

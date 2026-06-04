@@ -126,8 +126,6 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // ── OAuth state helpers ───────────────────────────────────────────────────────
-// Store nonce+state in Redis keyed by baseState so /callback can recover them
-// even when Safari ITP or strict Android Chrome drops the session cookie.
 
 const OAUTH_STATE_TTL = 600; // 10 minutes
 
@@ -161,31 +159,41 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       .eq('token', inviteToken)
       .single();
 
-    if (!error && invite && (!invite.expires_at || new Date(invite.expires_at) > new Date())) {
-      const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
-        org_id:   invite.org_id,
-        user_sub: userInfo.sub,
-        email:    userInfo.email,
-        role:     'member',
-      }, { onConflict: 'org_id,user_sub' });
-
-      if (upsertErr) {
-        console.error('[invite] upsert failed:', upsertErr.message);
-      } else {
-        req.session.orgId   = invite.org_id;
-        req.session.orgName = invite.orgs.name;
-        req.session.mode    = 'org';
-        req.session.memberships = [
-          ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
-          { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
-        ];
-      }
-    } else {
-      console.warn('[invite] Invalid or expired token:', inviteToken, error?.message);
+    if (error || !invite) {
+      console.warn('[invite] Token not found:', inviteToken, error?.message);
       return req.session.save(() =>
         res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`)
       );
     }
+
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+      console.warn('[invite] Token expired:', inviteToken);
+      return req.session.save(() =>
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`)
+      );
+    }
+
+    const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
+      org_id:   invite.org_id,
+      user_sub: userInfo.sub,
+      email:    userInfo.email,
+      role:     'member',
+    }, { onConflict: 'org_id,user_sub' });
+
+    if (upsertErr) {
+      console.error('[invite] upsert failed:', upsertErr.message);
+      return req.session.save(() =>
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`)
+      );
+    }
+
+    req.session.orgId   = invite.org_id;
+    req.session.orgName = invite.orgs.name;
+    req.session.mode    = 'org';
+    req.session.memberships = [
+      ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
+      { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
+    ];
   } catch (err) {
     console.error('[invite] processInviteAndRedirect error:', err.message);
   }
@@ -215,7 +223,6 @@ app.get('/login', checkClientReady, async (req, res) => {
   const nonce        = generators.nonce();
   const baseState    = generators.state();
 
-  // FIX: read req.query.redirect (not returnTo — JoinPage now uses redirect=)
   const redirectPath = req.query.redirect || '';
   const inviteMatch  = redirectPath.match(/\/org\/join\/([^/?#]+)/);
 
@@ -297,6 +304,7 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     req.session.memberships = memberships || [];
 
+    
     if (stateInviteToken)
       return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
 
@@ -335,14 +343,11 @@ app.post('/refresh', requireAuth, async (req, res) => {
 });
 
 // ── Org: join via invite link ─────────────────────────────────────────────────
-// This route is the ACTUAL join handler — JoinPage.jsx redirects here after
-// confirming the user is logged in.
 
 app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const { token } = req.params;
   const user      = req.session.userInfo;
 
-  // Not logged in — redirect to login with the invite path baked into state
   if (!user) {
     return res.redirect(`/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`);
   }
@@ -432,8 +437,6 @@ app.post('/org/select', requireAuth, async (req, res) => {
   res.status(400).json({ error: 'Invalid selection' });
 });
 
-// ── Org: create ───────────────────────────────────────────────────────────────
-
 app.post('/org/create', requireAuth, async (req, res) => {
   const { name } = req.body;
   const user     = req.session.userInfo;
@@ -461,8 +464,7 @@ app.post('/org/create', requireAuth, async (req, res) => {
       token:      inviteToken,
       created_by: user.sub,
       expires_at: inviteExpiresAt(7),
-    });
-
+    });    
     req.session.orgId   = org.id;
     req.session.orgName = org.name;
     req.session.mode    = 'org';
@@ -471,7 +473,9 @@ app.post('/org/create', requireAuth, async (req, res) => {
       { org_id: org.id, role: 'admin', orgs: { id: org.id, name: org.name } },
     ];
 
-    req.session.save(() => res.json({ org, inviteToken }));
+    const inviteUrl = `${process.env.FRONTEND_URL}/org/join/${inviteToken}`;
+
+    req.session.save(() => res.json({ org, inviteToken, inviteUrl }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -488,7 +492,6 @@ app.post('/org/invite', requireAdmin, async (req, res) => {
     created_by: req.session.userInfo.sub,
     expires_at: inviteExpiresAt(7),
   });
-  // inviteUrl points to FRONTEND /org/join/:token — JoinPage handles the rest
   res.json({ inviteUrl: `${process.env.FRONTEND_URL}/org/join/${token}` });
 });
 

@@ -512,7 +512,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
         setSharedHistoryLoaded(true);
       })
       .catch(() => setSharedHistoryLoaded(true));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOrg, tokenReady, docName]);
 
   // ── PDF file resolution ──────────────────────────────────────────────────

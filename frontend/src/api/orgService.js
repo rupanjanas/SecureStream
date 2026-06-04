@@ -1,5 +1,4 @@
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
-const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
 
 export async function createOrg(name) {
   const res = await fetch(`${AUTH_URL}/org/create`, {
@@ -61,7 +60,6 @@ export async function sendEmailInvite(email, inviteUrl) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
-
 
 export async function getMemberships() {
   const res = await fetch(`${AUTH_URL}/org/memberships`, {

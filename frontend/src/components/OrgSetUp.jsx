@@ -1,8 +1,9 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { createOrg, generateInvite, sendEmailInvite } from "../api/orgService";
+import { generateInvite, sendEmailInvite } from "../api/orgService";
+
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
-const AI_URL = import.meta.env.VITE_AI_SERVICE_URL;
+
 export default function OrgSetupPage() {
   const [step, setStep]               = useState("name");
   const [inviteUrl, setInviteUrl]     = useState("");
@@ -20,19 +21,40 @@ export default function OrgSetupPage() {
 
   // Handle return from login with pending org name
   const [orgName, setOrgName] = useState(() => {
-  const pending = sessionStorage.getItem("pendingOrgName");
-  if (pending) {
-    sessionStorage.removeItem("pendingOrgName");
-    return pending;
-  }
-  return "";
-});
+    const pending = sessionStorage.getItem("pendingOrgName");
+    if (pending) {
+      sessionStorage.removeItem("pendingOrgName");
+      return pending;
+    }
+    return "";
+  });
 
   const doCreate = async (name) => {
     setLoading(true);
     setError(null);
     try {
-      const data = await createOrg(name);
+      // FIX: call /org/create directly instead of using the orgService wrapper
+      // so we can read the full response including inviteUrl.
+      const res = await fetch(`${AUTH_URL}/org/create`, {
+        method:      "POST",
+        credentials: "include",
+        headers:     { "Content-Type": "application/json" },
+        body:        JSON.stringify({ name }),
+      });
+
+      // Not authenticated — save the name and redirect to login
+      if (res.status === 401) {
+        sessionStorage.setItem("pendingOrgName", name);
+        window.location.href = `${AUTH_URL}/login`;
+        return;
+      }
+
+      if (!res.ok) {
+        const msg = await res.text().catch(() => `HTTP ${res.status}`);
+        throw new Error(msg);
+      }
+
+      const data = await res.json();
 
       if (data?.error === "not_authenticated") {
         sessionStorage.setItem("pendingOrgName", name);
@@ -41,10 +63,14 @@ export default function OrgSetupPage() {
       }
 
       setOrgData(data.org);
+      if (data.inviteUrl) {
+        setInviteUrl(data.inviteUrl);
+      } else {
+        // Fallback (should not be needed with updated server)
+        const invite = await generateInvite();
+        setInviteUrl(invite.inviteUrl);
+      }
 
-      // Generate first invite link automatically
-      const invite = await generateInvite();
-      setInviteUrl(invite.inviteUrl);
       setStep("invite");
     } catch (err) {
       if (err.message?.includes("401")) {
@@ -258,7 +284,6 @@ export default function OrgSetupPage() {
                   Invite by email
                 </p>
 
-                {/* Email input */}
                 <div className="flex gap-2 mb-2">
                   <input
                     ref={emailRef}
@@ -282,7 +307,6 @@ export default function OrgSetupPage() {
                   <p className="text-xs text-red-500 mb-2">{emailError}</p>
                 )}
 
-                {/* Email chips */}
                 {emailList.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mb-3">
                     {emailList.map((email) => (
@@ -300,7 +324,6 @@ export default function OrgSetupPage() {
                   </div>
                 )}
 
-                {/* Send button */}
                 {emailList.length > 0 && (
                   <button
                     onClick={handleSendAll}
@@ -320,7 +343,6 @@ export default function OrgSetupPage() {
                   </button>
                 )}
 
-                {/* Send results */}
                 {emailResults.length > 0 && (
                   <div className="mt-2 flex flex-col gap-1">
                     {emailResults.map((r) => (

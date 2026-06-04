@@ -1,48 +1,46 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL;
 
 export default function JoinPage({ user, authLoading }) {
-  const { token }  = useParams();          // ← FIX: path param, not query param
+  const { token }  = useParams();
   const navigate   = useNavigate();
-  const [status, setStatus] = useState("verifying");  // verifying | joining | error
-  const [errorMsg, setErrorMsg] = useState("");
+
+  const params = new URLSearchParams(window.location.search);
+  const serverError = params.get("error");
+  const messages = {
+    invalid_invite: "This invite link is invalid or has already been used.",
+    expired_invite: "This invite link has expired. Ask your admin to generate a new one.",
+    join_failed:    "Something went wrong joining the workspace. Please try again.",
+  };
+
+  const errorMsg = !token
+    ? "Invalid invite link — no token found."
+    : !BACKEND
+      ? "Configuration error — backend URL is not set."
+      : serverError
+        ? (messages[serverError] || "An unexpected error occurred.")
+        : "";
+
+  const status = authLoading ? "verifying" : errorMsg ? "error" : "joining";
 
   useEffect(() => {
-    // Wait until App.jsx finishes its session fetch so `user` is reliable
-    if (authLoading) return;
+    // Wait for App.jsx to finish its session fetch so `user` is reliable
+    if (authLoading || errorMsg) return;
 
-    if (!token) {
-      setErrorMsg("Invalid invite link — no token found.");
-      setStatus("error");
-      return;
-    }
+    const redirectUrl = !user
+      ? `${BACKEND}/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
+      : `${BACKEND}/org/join/${token}`;
 
-    if (!BACKEND) {
-      setErrorMsg("Configuration error — backend URL is not set.");
-      setStatus("error");
-      return;
-    }
-
-    if (!user) {
-      setStatus("joining");
-      window.location.href = `${BACKEND}/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`;
-      return;
-    }
-
-    // Logged in — hand off to the Node server which validates the token,
-    // upserts org_members, saves the session, and redirects to /dashboard.
-    setStatus("joining");
-    // Small timeout so "Joining…" text renders before the hard redirect
     const t = setTimeout(() => {
-      window.location.href = `${BACKEND}/org/join/${token}`;
+      window.location.href = redirectUrl;
     }, 300);
     return () => clearTimeout(t);
 
-  }, [user, authLoading, token]);  // re-run only when auth state or token changes
+  }, [user, authLoading, token, errorMsg]);
 
-  // ── UI ──────────────────────────────────────────────────────────────────────
+  // ── UI ───────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 font-sans">
       <div className="bg-white rounded-2xl shadow-xl px-8 py-10 w-full max-w-sm text-center">
