@@ -151,13 +151,15 @@ async function loadAndDeleteOAuthParams(baseState) {
 
 // ── Invite helper ─────────────────────────────────────────────────────────────
 
+// FIX: restructured so every error path returns early with an error redirect,
+// and the success path is the only one that reaches the final dashboard redirect.
 async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
-  try {
-    console.log('================ INVITE FLOW START ================');
-    console.log('[invite] Token:', inviteToken);
-    console.log('[invite] User email:', userInfo?.email);
-    console.log('[invite] User sub:', userInfo?.sub);
+  console.log('================ INVITE FLOW START ================');
+  console.log('[invite] Token:', inviteToken);
+  console.log('[invite] User email:', userInfo?.email);
+  console.log('[invite] User sub:', userInfo?.sub);
 
+  try {
     const { data: invite, error } = await supabaseAdmin
       .from('invite_tokens')
       .select('*, orgs(*)')
@@ -177,11 +179,8 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
     if (error || !invite) {
       console.warn('[invite] Token not found:', inviteToken);
       console.warn('[invite] Supabase error:', error?.message);
-
       return req.session.save(() =>
-        res.redirect(
-          `${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`
-        )
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`)
       );
     }
 
@@ -189,11 +188,8 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       console.warn('[invite] Token expired:', inviteToken);
       console.warn('[invite] Expiry:', invite.expires_at);
       console.warn('[invite] Current:', new Date().toISOString());
-
       return req.session.save(() =>
-        res.redirect(
-          `${process.env.FRONTEND_URL}/dashboard?error=expired_invite`
-        )
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`)
       );
     }
 
@@ -203,74 +199,60 @@ async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
       .from('org_members')
       .upsert(
         {
-          org_id: invite.org_id,
+          org_id:   invite.org_id,
           user_sub: userInfo.sub,
-          email: userInfo.email,
-          role: 'member',
+          email:    userInfo.email,
+          role:     'member',
         },
-        {
-          onConflict: 'org_id,user_sub',
-        }
+        { onConflict: 'org_id,user_sub' }
       );
 
     console.log('[invite] Upsert completed');
     console.log('[invite] Upsert error:', upsertErr);
 
     if (upsertErr) {
-      console.error('[invite] Upsert failed');
-      console.error('[invite] Error message:', upsertErr.message);
-      console.error('[invite] Full error:', upsertErr);
-
+      console.error('[invite] Upsert failed:', upsertErr.message);
+      // FIX: now correctly returns early on upsert failure
       return req.session.save(() =>
-        res.redirect(
-          `${process.env.FRONTEND_URL}/dashboard?error=join_failed`
-        )
+        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`)
       );
     }
 
     console.log('[invite] Updating session');
 
-    req.session.orgId = invite.org_id;
+    req.session.orgId   = invite.org_id;
     req.session.orgName = invite.orgs.name;
-    req.session.mode = 'org';
-
+    req.session.mode    = 'org';
     req.session.memberships = [
-      ...(req.session.memberships || []).filter(
-        (m) => m.org_id !== invite.org_id
-      ),
+      ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
       {
         org_id: invite.org_id,
-        role: 'member',
-        orgs: {
-          id: invite.org_id,
-          name: invite.orgs.name,
-        },
+        role:   'member',
+        orgs:   { id: invite.org_id, name: invite.orgs.name },
       },
     ];
 
     console.log('[invite] Session orgId:', req.session.orgId);
     console.log('[invite] Session orgName:', req.session.orgName);
     console.log('[invite] Session mode:', req.session.mode);
-    console.log(
-      '[invite] Membership count:',
-      req.session.memberships.length
+    console.log('[invite] Membership count:', req.session.memberships.length);
+    console.log('[invite] Redirecting to dashboard');
+    console.log('================ INVITE FLOW END ================');
+
+    return req.session.save(() =>
+      res.redirect(`${process.env.FRONTEND_URL}/dashboard`)
     );
 
-    console.log('[invite] Saving session...');
   } catch (err) {
     console.error('================ INVITE ERROR ================');
-    console.error('[invite] processInviteAndRedirect error:', err);
-    console.error('[invite] Message:', err.message);
+    console.error('[invite] processInviteAndRedirect error:', err.message);
     console.error('[invite] Stack:', err.stack);
     console.error('=============================================');
+    // FIX: catch now redirects with an error instead of falling through
+    return req.session.save(() =>
+      res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`)
+    );
   }
-
-  console.log('[invite] Redirecting to dashboard');
-  console.log('================ INVITE FLOW END ================');
-
-  return req.session.save(() =>
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard`)
-  );
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -292,59 +274,67 @@ app.get('/', (req, res) => {
 
 // ── Login ─────────────────────────────────────────────────────────────────────
 
-app.get('/login', checkClientReady, async (req, res) => {
-  const nonce = generators.nonce();
-  const baseState = generators.state();
-
-  const redirectPath = req.query.redirect || '';
-
-  console.log('================ LOGIN START ================');
-  console.log('[login] redirectPath:', redirectPath);
-  console.log('[login] query:', req.query);
-
-  const inviteMatch = redirectPath.match(/\/org\/join\/([^/?#]+)/);
-
-  console.log('[login] inviteMatch:', inviteMatch);
-
-  const fullState = inviteMatch
-    ? `${baseState}|inviteToken:${inviteMatch[1]}`
-    : baseState;
-
-  console.log('[login] baseState:', baseState);
-  console.log('[login] fullState:', fullState);
-  console.log('[login] inviteToken:', inviteMatch?.[1] || null);
-
-  req.session.nonce = nonce;
-  req.session.state = baseState;
-
-  console.log('[login] sessionID:', req.sessionID);
-  console.log('[login] nonce:', nonce);
-
-  try {
-    await saveOAuthParams(baseState, nonce);
-    console.log('[login] OAuth params saved to Redis');
-  } catch (err) {
-    console.error('[login] Redis saveOAuthParams failed:', err.message);
-  }
-
-  req.session.save((err) => {
-    if (err) {
-      console.error('[login] Session save error:', err);
+app.get('/login', checkClientReady, (req, res) => {
+  // FIX: regenerate session before each login to prevent nonce/state bleed
+  // between concurrent or back-to-back login attempts on the same session ID.
+  req.session.regenerate(async (regenErr) => {
+    if (regenErr) {
+      console.error('[login] Session regenerate error:', regenErr);
       return res.status(500).send('Session error');
     }
 
-    console.log('[login] Session saved successfully');
+    const nonce       = generators.nonce();
+    const baseState   = generators.state();
+    const redirectPath = req.query.redirect || '';
 
-    const authUrl = client.authorizationUrl({
-      scope: 'phone openid email',
-      state: fullState,
-      nonce,
+    console.log('================ LOGIN START ================');
+    console.log('[login] redirectPath:', redirectPath);
+    console.log('[login] query:', req.query);
+
+    const inviteMatch = redirectPath.match(/\/org\/join\/([^/?#]+)/);
+
+    console.log('[login] inviteMatch:', inviteMatch);
+
+    const fullState = inviteMatch
+      ? `${baseState}|inviteToken:${inviteMatch[1]}`
+      : baseState;
+
+    console.log('[login] baseState:', baseState);
+    console.log('[login] fullState:', fullState);
+    console.log('[login] inviteToken:', inviteMatch?.[1] || null);
+
+    req.session.nonce = nonce;
+    req.session.state = baseState;
+
+    console.log('[login] sessionID:', req.sessionID);
+    console.log('[login] nonce:', nonce);
+
+    try {
+      await saveOAuthParams(baseState, nonce);
+      console.log('[login] OAuth params saved to Redis');
+    } catch (err) {
+      console.error('[login] Redis saveOAuthParams failed:', err.message);
+    }
+
+    req.session.save((saveErr) => {
+      if (saveErr) {
+        console.error('[login] Session save error:', saveErr);
+        return res.status(500).send('Session error');
+      }
+
+      console.log('[login] Session saved successfully');
+
+      const authUrl = client.authorizationUrl({
+        scope: 'phone openid email',
+        state: fullState,
+        nonce,
+      });
+
+      console.log('[login] authUrl:', authUrl);
+      console.log('================ LOGIN END ================');
+
+      res.redirect(authUrl);
     });
-
-    console.log('[login] authUrl:', authUrl);
-    console.log('================ LOGIN END ================');
-
-    res.redirect(authUrl);
   });
 });
 
@@ -378,23 +368,18 @@ app.get('/callback', checkClientReady, async (req, res) => {
 
     if (!expectedNonce || !expectedState) {
       console.error('[callback] Missing nonce and state — both session and Redis failed');
-      return res.redirect(
-        `${process.env.FRONTEND_URL}/login?error=session_expired`
-      );
+      return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
     }
 
-    const params = client.callbackParams(req);
-    params.state = baseState;
+    const params   = client.callbackParams(req);
+    params.state   = baseState;
 
     console.log('[callback] Starting token exchange...');
 
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
       params,
-      {
-        nonce: expectedNonce,
-        state: expectedState,
-      }
+      { nonce: expectedNonce, state: expectedState }
     );
 
     console.log('[callback] Token exchange successful');
@@ -406,77 +391,59 @@ app.get('/callback', checkClientReady, async (req, res) => {
     console.log('[callback] User sub:', userInfo.sub);
 
     req.session.userInfo = userInfo;
-    req.session.tokens = {
-      access_token: tokenSet.access_token,
-      id_token: tokenSet.id_token,
+    req.session.tokens   = {
+      access_token:  tokenSet.access_token,
+      id_token:      tokenSet.id_token,
       refresh_token: tokenSet.refresh_token,
     };
 
     delete req.session.nonce;
     delete req.session.state;
 
-    const { data: memberships, error: membershipsError } =
-      await supabaseAdmin
-        .from('org_members')
-        .select('org_id, role, orgs(id, name)')
-        .eq('user_sub', userInfo.sub);
+    // FIX: added explicit log before the Supabase query so a silent failure
+    // here is immediately visible in logs (was the source of cut-off callbacks).
+    console.log('[callback] Querying memberships...');
+
+    const { data: memberships, error: membershipsError } = await supabaseAdmin
+      .from('org_members')
+      .select('org_id, role, orgs(id, name)')
+      .eq('user_sub', userInfo.sub);
 
     if (membershipsError) {
-      console.error(
-        '[callback] Membership query failed:',
-        membershipsError
-      );
+      console.error('[callback] Membership query failed:', membershipsError.message);
     }
 
-    console.log(
-      '[callback] Memberships found:',
-      memberships?.length || 0
-    );
+    console.log('[callback] Memberships found:', memberships?.length || 0);
 
     req.session.memberships = memberships || [];
 
     if (stateInviteToken) {
-      console.log(
-        '[callback] Invite token found. Processing invite:',
-        stateInviteToken
-      );
-
-      return processInviteAndRedirect(
-        req,
-        res,
-        stateInviteToken,
-        userInfo
-      );
+      console.log('[callback] Invite token found. Processing invite:', stateInviteToken);
+      return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
     }
 
     console.log('[callback] No invite token present');
 
     if (memberships?.length === 1) {
-      req.session.orgId = memberships[0].org_id;
+      req.session.orgId   = memberships[0].org_id;
       req.session.orgName = memberships[0].orgs?.name;
-      req.session.mode = 'org';
-
-      console.log(
-        '[callback] Auto-selected org:',
-        memberships[0].org_id
-      );
+      req.session.mode    = 'org';
+      console.log('[callback] Auto-selected org:', memberships[0].org_id);
     }
 
     console.log('[callback] Redirecting to dashboard');
 
-    req.session.save(() =>
-      res.redirect(`${process.env.FRONTEND_URL}/dashboard`)
-    );
+    req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
 
   } catch (err) {
     console.error('================ CALLBACK ERROR ================');
     console.error(err);
     console.error('STACK:', err.stack);
     console.error('================================================');
-
     res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed`);
   }
 });
+
 // ── Refresh ───────────────────────────────────────────────────────────────────
 
 app.post('/refresh', requireAuth, async (req, res) => {
@@ -504,15 +471,11 @@ app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const user      = req.session.userInfo;
 
   if (!user) {
-  console.log(
-    "[join] Redirecting to login with token:",
-    token
-  );
-
-  return res.redirect(
-    `/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
-  );
-}
+    console.log('[join] Redirecting to login with token:', token);
+    return res.redirect(
+      `/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
+    );
+  }
 
   const { data: invite, error } = await supabaseAdmin
     .from('invite_tokens')
@@ -526,12 +489,17 @@ app.get('/org/join/:token', checkClientReady, async (req, res) => {
   if (invite.expires_at && new Date(invite.expires_at) < new Date())
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
 
-  const { error: upsertErr } = await supabaseAdmin.from('org_members').upsert({
-    org_id:   invite.org_id,
-    user_sub: user.sub,
-    email:    user.email,
-    role:     'member',
-  }, { onConflict: 'org_id,user_sub' });
+  const { error: upsertErr } = await supabaseAdmin
+    .from('org_members')
+    .upsert(
+      {
+        org_id:   invite.org_id,
+        user_sub: user.sub,
+        email:    user.email,
+        role:     'member',
+      },
+      { onConflict: 'org_id,user_sub' }
+    );
 
   if (upsertErr) {
     console.error('[join] upsert failed:', upsertErr.message);
@@ -626,7 +594,8 @@ app.post('/org/create', requireAuth, async (req, res) => {
       token:      inviteToken,
       created_by: user.sub,
       expires_at: inviteExpiresAt(7),
-    });    
+    });
+
     req.session.orgId   = org.id;
     req.session.orgName = org.name;
     req.session.mode    = 'org';

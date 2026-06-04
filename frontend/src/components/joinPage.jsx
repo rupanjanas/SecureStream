@@ -26,21 +26,21 @@ export default function JoinPage({ user, authLoading }) {
   const status = authLoading ? "verifying" : errorMsg ? "error" : "joining";
 
   useEffect(() => {
-    // Wait for App.jsx to finish its session fetch so `user` is reliable
-    if (authLoading || errorMsg) return;
+  if (authLoading || errorMsg) return;
 
-    const redirectUrl = !user
-      ? `${BACKEND}/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
-      : `${BACKEND}/org/join/${token}`;
-    console.log("JOIN PAGE TOKEN:", token);
-    console.log("JOIN PAGE USER:", user);
-    console.log("REDIRECT URL:", redirectUrl);
-    const t = setTimeout(() => {
-      window.location.href = redirectUrl;
-    }, 300);
-    return () => clearTimeout(t);
+  if (!user) {
+    window.location.assign(
+      `${BACKEND}/login?redirect=${encodeURIComponent(
+        `/org/join/${token}`
+      )}`
+    );
+    return;
+  }
 
-  }, [user, authLoading, token, errorMsg]);
+  window.location.assign(
+    `${BACKEND}/org/join/${token}`
+  );
+}, [user, authLoading, token, errorMsg]);
 
   // ── UI ───────────────────────────────────────────────────────────────────────
   return (

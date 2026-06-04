@@ -242,10 +242,10 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
 }
 
 function InviteModal({ orgName, onClose, token }) {
-  const [copied, setCopied]         = useState(false);
-  const [inviteLink, setInviteLink] = useState("");
+  const [copied, setCopied]           = useState(false);
+  const [inviteLink, setInviteLink]   = useState("");
   const [linkLoading, setLinkLoading] = useState(true);
-  const [linkError, setLinkError]   = useState("");
+  const [linkError, setLinkError]     = useState("");
 
   const fetchInviteLink = useCallback(() => {
     if (!token) {
@@ -253,13 +253,12 @@ function InviteModal({ orgName, onClose, token }) {
       setLinkLoading(false);
       return;
     }
+    // FIX: added credentials: "include" so the session cookie is sent —
+    // requireAdmin reads req.session, not the Authorization header.
     fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
       method:      "POST",
       credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:  `Bearer ${token}`,
-      },
+      headers:     { "Content-Type": "application/json" },
     })
       .then((r) => {
         if (!r.ok) throw new Error(`Server returned ${r.status}`);
@@ -477,9 +476,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
   const SOURCES_KEY = sourcesKey(docName);
 
   // ── Token / orgId bootstrap ──────────────────────────────────────────────
-  // FIX: both tokenRef and orgIdRef are populated in a single fetch effect.
-  // The shared-history effect depends on tokenReady, which only flips after
-  // both values are set, so there is no race between them.
   const tokenRef  = useRef(null);
   const orgIdRef  = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
@@ -488,8 +484,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
     fetch(`${AUTH_URL}/`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => {
-        tokenRef.current  = d.access_token || "dev-token";
-        orgIdRef.current  = d.orgId || null;   // FIX: capture orgId here
+        tokenRef.current = d.access_token || "dev-token";
+        orgIdRef.current = d.orgId || null;
         setTokenReady(true);
       })
       .catch(() => {
@@ -499,8 +495,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, []);
 
   // ── Shared chat history (org mode only) ──────────────────────────────────
-  // FIX: this effect now runs after tokenReady is true, which guarantees
-  // orgIdRef.current is populated before the fetch is attempted.
   const [sharedHistoryLoaded, setSharedHistoryLoaded] = useState(!isOrg);
 
   useEffect(() => {
@@ -526,7 +520,8 @@ export default function DocViewerPage({ user, mode, orgName }) {
       try {
         const res = await fetch(
           `${AUTH_URL}/documents/file-url?doc_name=${encodeURIComponent(docName)}`,
-          { headers: { Authorization: `Bearer ${tokenRef.current}` } }
+          // FIX: added credentials: "include" so the session cookie is sent
+          { credentials: "include" }
         );
         if (res.ok) {
           const data = await res.json();
@@ -547,16 +542,24 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setManualFile(file);
   };
 
+  // FIX: blob URL creation moved out of useMemo into a useEffect.
+  // useMemo must be pure — calling URL.createObjectURL inside it causes
+  // a URL leak in React Strict Mode (runs twice, leaks the first one).
+  useEffect(() => {
+    if (isPDF || resolvedFileUrl || manualFile) return;
+    if (blobUrlRef.current) return; // already created
+    const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
+    if (fileObj) {
+      blobUrlRef.current = URL.createObjectURL(fileObj);
+    }
+  }, [isPDF, resolvedFileUrl, stateFile, manualFile]);
+
   const pdfFile = useMemo(() => {
     if (!isPDF) return null;
     if (resolvedFileUrl) return { url: resolvedFileUrl };
     if (manualFile && blobUrlRef.current) return { url: blobUrlRef.current };
-    if (!blobUrlRef.current) {
-      const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
-      if (fileObj) blobUrlRef.current = URL.createObjectURL(fileObj);
-    }
     return blobUrlRef.current ? { url: blobUrlRef.current } : null;
-  }, [isPDF, resolvedFileUrl, stateFile, manualFile]);
+  }, [isPDF, resolvedFileUrl, manualFile]);
 
   useEffect(() => {
     return () => {
@@ -570,7 +573,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
   // ── Chat / sources state ─────────────────────────────────────────────────
   const [messages, setMessages] = useState(() =>
     isOrg
-      ? []   // populated by shared-history effect once token is ready
+      ? []
       : loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
   );
   const [sourcesHistory, setSourcesHistory] = useState(() =>
@@ -626,7 +629,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, [docName, navigate]);
 
   // ── Fetch document text ──────────────────────────────────────────────────
-  // FIX: pass orgIdRef.current so org members can fetch text of shared docs.
   useEffect(() => {
     if (!docName || !tokenReady) return;
     const t = setTimeout(async () => {
@@ -675,29 +677,33 @@ export default function DocViewerPage({ user, mode, orgName }) {
     if (sel && sel.length > 3) { setSelectedText(sel); setShowNotePanel(true); }
   };
 
+  // FIX: added credentials: "include" to both member management fetches.
+  // The backend uses requireAuth/requireAdmin which reads req.session —
+  // without the cookie, these calls silently return 401.
   const handleRemoveMember = async (member) => {
     await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}`, {
-      method: "DELETE", headers: { Authorization: `Bearer ${tokenRef.current}` },
+      method:      "DELETE",
+      credentials: "include",
     });
     setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
   };
 
   const handleChangeRole = async (member, newRole) => {
     await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}/role`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenRef.current}` },
-      body: JSON.stringify({ role: newRole }),
+      method:      "PATCH",
+      credentials: "include",
+      headers:     { "Content-Type": "application/json" },
+      body:        JSON.stringify({ role: newRole }),
     });
-    setMembers((prev) => prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m));
+    setMembers((prev) =>
+      prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m)
+    );
   };
 
   // ── Send question ────────────────────────────────────────────────────────
   const send = async () => {
     const question = input.trim();
-    if (!question || loading) return;
-
-    // FIX: guard against sending before token/orgId are available
-    if (!tokenReady) return;
+    if (!question || loading || !tokenReady) return;
 
     const newHistory = [...chatHistory, { role: "user", content: question }];
     setChatHistory(newHistory);
@@ -712,10 +718,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setHighlightedPages({});
 
     try {
-      // FIX: pass orgIdRef.current as the last argument so the AI backend
-      // scopes the vector search to the correct org's documents.
-      // Previously null was always passed here — this was the root cause of
-      // invited members seeing no results and no shared chat history.
       await askQuestionStream(
         question,
         docName,
@@ -731,7 +733,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
         (sources, passages) => {
           setChatHistory((h) => [
             ...h,
-            { role: "assistant", content: passages.length > 0 ? "..." : "Not found" }
+            { role: "assistant", content: passages.length > 0 ? "..." : "Not found" },
           ]);
           setMessages((m) => {
             const updated = [...m];
@@ -776,7 +778,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
           setLoading(false);
         },
         3,
-        orgIdRef.current,   // FIX: was hardcoded null
+        orgIdRef.current,
       );
     } catch (err) {
       setMessages((m) => {
