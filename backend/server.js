@@ -266,6 +266,9 @@ app.get('/callback', checkClientReady, async (req, res) => {
     if (!expectedNonce || !expectedState) {
       console.warn('[callback] Session nonce/state missing — trying Redis fallback');
       const stored = await loadAndDeleteOAuthParams(baseState);
+      console.log("STATE:", baseState);
+      console.log("REDIS RECOVERED:", !!stored);
+      console.log("STORED:", stored);
       if (stored) {
         expectedNonce = stored.nonce;
         expectedState = baseState;
