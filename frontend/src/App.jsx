@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import LandingPage         from "./components/landingPage";
 import OnboardingPage      from "./components/Onboarding";
 import OrgSetupPage        from "./components/OrgSetUp";
@@ -19,18 +19,6 @@ function ProtectedRoute({ user, loading, children }) {
   return children;
 }
 
-// ── JoinOrgRedirect ───────────────────────────────────────────────────────────
-function JoinOrgRedirect() {
-  const { token } = useParams();
-  useEffect(() => {
-    window.location.href = `${AUTH_URL}/org/join/${token}`;
-  }, [token]);
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <p className="text-sm text-gray-500">Joining workspace…</p>
-    </div>
-  );
-}
 
 // ── Loading spinner (inside Router so hooks always have context) ──────────────
 function LoadingScreen() {
@@ -68,7 +56,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);  // authLoading
   const [accessToken, setAccessToken] = useState(null); 
 
-  // App.jsx — update the session fetch block:
+  // App.jsx — update the session fetch block
 
 useEffect(() => {
   const controller = new AbortController();
@@ -105,10 +93,18 @@ useEffect(() => {
       }
 
       setUser(data.user);
-      setMode(data.mode       || "personal");
-      setOrgId(data.orgId     || null);
-      setOrgName(data.orgName || null);
-      setAccessToken(accessToken);
+setMode(data.mode || "personal");
+setOrgId(data.orgId || null);
+setOrgName(data.orgName || null);
+setAccessToken(accessToken);
+
+const pendingInvite =
+  localStorage.getItem("pendingInviteToken");
+
+if (pendingInvite) {
+  window.location.href =
+    `/join?token=${pendingInvite}`;
+}
     } catch (err) {
       if (err.name !== "AbortError") console.error("Session fetch failed:", err);
     } finally {
@@ -132,13 +128,7 @@ useEffect(() => {
           <Route path="/"           element={<LandingPage />} />
           <Route path="/onboarding" element={<OnboardingPage />} />
           <Route path="/org-setup"  element={<OrgSetupPage />} />
-
-          {/* Join routes — no auth required, JoinPage handles its own auth check */}
-          <Route path="/join"           element={
-            <JoinPage user={user} authLoading={loading} />
-          }/>
-          <Route path="/org/join/:token" element={<JoinOrgRedirect />} />
-
+          <Route path="/join" element={<JoinPage user={user} authLoading={loading}/>}/>
           {/* Protected routes */}
           <Route path="/workspace-select" element={
             <ProtectedRoute user={user} loading={loading}>

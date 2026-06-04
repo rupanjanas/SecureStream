@@ -126,135 +126,6 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
-// ── OAuth state helpers ───────────────────────────────────────────────────────
-
-const OAUTH_STATE_TTL = 600; // 10 minutes
-
-function splitState(rawState) {
-  if (!rawState) return { baseState: '', inviteToken: null };
-  const idx = rawState.indexOf('|inviteToken:');
-  if (idx === -1) return { baseState: rawState, inviteToken: null };
-  return {
-    baseState:   rawState.slice(0, idx),
-    inviteToken: rawState.slice(idx + '|inviteToken:'.length) || null,
-  };
-}
-
-async function saveOAuthParams(baseState, nonce) {
-  await redisClient.setEx(`oauth:${baseState}`, OAUTH_STATE_TTL, JSON.stringify({ nonce }));
-}
-
-async function loadAndDeleteOAuthParams(baseState) {
-  const raw = await redisClient.getDel(`oauth:${baseState}`);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-// ── Invite helper ─────────────────────────────────────────────────────────────
-
-// FIX: restructured so every error path returns early with an error redirect,
-// and the success path is the only one that reaches the final dashboard redirect.
-async function processInviteAndRedirect(req, res, inviteToken, userInfo) {
-  console.log('================ INVITE FLOW START ================');
-  console.log('[invite] Token:', inviteToken);
-  console.log('[invite] User email:', userInfo?.email);
-  console.log('[invite] User sub:', userInfo?.sub);
-
-  try {
-    const { data: invite, error } = await supabaseAdmin
-      .from('invite_tokens')
-      .select('*, orgs(*)')
-      .eq('token', inviteToken)
-      .single();
-
-    console.log('[invite] Query completed');
-    console.log('[invite] Query error:', error);
-    console.log('[invite] Invite found:', !!invite);
-
-    if (invite) {
-      console.log('[invite] Invite org_id:', invite.org_id);
-      console.log('[invite] Invite expires_at:', invite.expires_at);
-      console.log('[invite] Invite org name:', invite.orgs?.name);
-    }
-
-    if (error || !invite) {
-      console.warn('[invite] Token not found:', inviteToken);
-      console.warn('[invite] Supabase error:', error?.message);
-      return req.session.save(() =>
-        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`)
-      );
-    }
-
-    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
-      console.warn('[invite] Token expired:', inviteToken);
-      console.warn('[invite] Expiry:', invite.expires_at);
-      console.warn('[invite] Current:', new Date().toISOString());
-      return req.session.save(() =>
-        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`)
-      );
-    }
-
-    console.log('[invite] Starting org_members upsert');
-
-    const { error: upsertErr } = await supabaseAdmin
-      .from('org_members')
-      .upsert(
-        {
-          org_id:   invite.org_id,
-          user_sub: userInfo.sub,
-          email:    userInfo.email,
-          role:     'member',
-        },
-        { onConflict: 'org_id,user_sub' }
-      );
-
-    console.log('[invite] Upsert completed');
-    console.log('[invite] Upsert error:', upsertErr);
-
-    if (upsertErr) {
-      console.error('[invite] Upsert failed:', upsertErr.message);
-      // FIX: now correctly returns early on upsert failure
-      return req.session.save(() =>
-        res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`)
-      );
-    }
-
-    console.log('[invite] Updating session');
-
-    req.session.orgId   = invite.org_id;
-    req.session.orgName = invite.orgs.name;
-    req.session.mode    = 'org';
-    req.session.memberships = [
-      ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
-      {
-        org_id: invite.org_id,
-        role:   'member',
-        orgs:   { id: invite.org_id, name: invite.orgs.name },
-      },
-    ];
-
-    console.log('[invite] Session orgId:', req.session.orgId);
-    console.log('[invite] Session orgName:', req.session.orgName);
-    console.log('[invite] Session mode:', req.session.mode);
-    console.log('[invite] Membership count:', req.session.memberships.length);
-    console.log('[invite] Redirecting to dashboard');
-    console.log('================ INVITE FLOW END ================');
-
-    return req.session.save(() =>
-      res.redirect(`${process.env.FRONTEND_URL}/dashboard`)
-    );
-
-  } catch (err) {
-    console.error('================ INVITE ERROR ================');
-    console.error('[invite] processInviteAndRedirect error:', err.message);
-    console.error('[invite] Stack:', err.stack);
-    console.error('=============================================');
-    // FIX: catch now redirects with an error instead of falling through
-    return req.session.save(() =>
-      res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`)
-    );
-  }
-}
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -276,46 +147,17 @@ app.get('/', (req, res) => {
 // ── Login ─────────────────────────────────────────────────────────────────────
 
 app.get('/login', checkClientReady, (req, res) => {
-  // FIX: regenerate session before each login to prevent nonce/state bleed
-  // between concurrent or back-to-back login attempts on the same session ID.
-  req.session.regenerate(async (regenErr) => {
+  req.session.regenerate((regenErr) => {
     if (regenErr) {
       console.error('[login] Session regenerate error:', regenErr);
       return res.status(500).send('Session error');
     }
 
-    const nonce       = generators.nonce();
-    const baseState   = generators.state();
-    const redirectPath = req.query.redirect || '';
-
-    console.log('================ LOGIN START ================');
-    console.log('[login] redirectPath:', redirectPath);
-    console.log('[login] query:', req.query);
-
-    const inviteMatch = redirectPath.match(/\/org\/join\/([^/?#]+)/);
-
-    console.log('[login] inviteMatch:', inviteMatch);
-
-    const fullState = inviteMatch
-      ? `${baseState}|inviteToken:${inviteMatch[1]}`
-      : baseState;
-
-    console.log('[login] baseState:', baseState);
-    console.log('[login] fullState:', fullState);
-    console.log('[login] inviteToken:', inviteMatch?.[1] || null);
+    const nonce = generators.nonce();
+    const state = generators.state();
 
     req.session.nonce = nonce;
-    req.session.state = baseState;
-
-    console.log('[login] sessionID:', req.sessionID);
-    console.log('[login] nonce:', nonce);
-
-    try {
-      await saveOAuthParams(baseState, nonce);
-      console.log('[login] OAuth params saved to Redis');
-    } catch (err) {
-      console.error('[login] Redis saveOAuthParams failed:', err.message);
-    }
+    req.session.state = state;
 
     req.session.save((saveErr) => {
       if (saveErr) {
@@ -323,16 +165,11 @@ app.get('/login', checkClientReady, (req, res) => {
         return res.status(500).send('Session error');
       }
 
-      console.log('[login] Session saved successfully');
-
       const authUrl = client.authorizationUrl({
         scope: 'phone openid email',
-        state: fullState,
+        state,
         nonce,
       });
-
-      console.log('[login] authUrl:', authUrl);
-      console.log('================ LOGIN END ================');
 
       res.redirect(authUrl);
     });
@@ -343,105 +180,74 @@ app.get('/login', checkClientReady, (req, res) => {
 
 app.get('/callback', checkClientReady, async (req, res) => {
   try {
-    const rawState = req.query.state || '';
-    const { baseState, inviteToken: stateInviteToken } = splitState(rawState);
-
-    console.log('[callback] rawState:', rawState);
-    console.log('[callback] stateInviteToken:', stateInviteToken);
-
-    let expectedNonce = req.session.nonce;
-    let expectedState = req.session.state;
-
-    if (!expectedNonce || !expectedState) {
-      console.warn('[callback] Session nonce/state missing — trying Redis fallback');
-
-      const stored = await loadAndDeleteOAuthParams(baseState);
-
-      console.log('STATE:', baseState);
-      console.log('REDIS RECOVERED:', !!stored);
-      console.log('STORED:', stored);
-
-      if (stored) {
-        expectedNonce = stored.nonce;
-        expectedState = baseState;
-      }
-    }
-
-    if (!expectedNonce || !expectedState) {
-      console.error('[callback] Missing nonce and state — both session and Redis failed');
-      return res.redirect(`${process.env.FRONTEND_URL}/login?error=session_expired`);
-    }
-
-    const params   = client.callbackParams(req);
-    params.state   = baseState;
-
-    console.log('[callback] Starting token exchange...');
+    const params = client.callbackParams(req);
 
     const tokenSet = await client.callback(
       process.env.REDIRECT_URI,
       params,
-      { nonce: expectedNonce, state: expectedState }
+      {
+        nonce: req.session.nonce,
+        state: req.session.state,
+      }
     );
 
-    console.log('[callback] Token exchange successful');
-
-    const userInfo = await client.userinfo(tokenSet.access_token);
-
-    console.log('[callback] User info fetched');
-    console.log('[callback] User email:', userInfo.email);
-    console.log('[callback] User sub:', userInfo.sub);
+    const userInfo = await client.userinfo(
+      tokenSet.access_token
+    );
 
     req.session.userInfo = userInfo;
-    req.session.tokens   = {
-      access_token:  tokenSet.access_token,
-      id_token:      tokenSet.id_token,
+
+    req.session.tokens = {
+      access_token: tokenSet.access_token,
+      id_token: tokenSet.id_token,
       refresh_token: tokenSet.refresh_token,
     };
 
     delete req.session.nonce;
     delete req.session.state;
 
-    // FIX: added explicit log before the Supabase query so a silent failure
-    // here is immediately visible in logs (was the source of cut-off callbacks).
-    console.log('[callback] Querying memberships...');
+    const { data: memberships, error } =
+      await supabaseAdmin
+        .from('org_members')
+        .select('org_id, role, orgs(id,name)')
+        .eq('user_sub', userInfo.sub);
 
-    const { data: memberships, error: membershipsError } = await supabaseAdmin
-      .from('org_members')
-      .select('org_id, role, orgs(id, name)')
-      .eq('user_sub', userInfo.sub);
-
-    if (membershipsError) {
-      console.error('[callback] Membership query failed:', membershipsError.message);
+    if (error) {
+      console.error(
+        '[callback] Membership query failed:',
+        error.message
+      );
     }
 
-    console.log('[callback] Memberships found:', memberships?.length || 0);
+    req.session.memberships =
+      memberships || [];
 
-    req.session.memberships = memberships || [];
-
-    if (stateInviteToken) {
-      console.log('[callback] Invite token found. Processing invite:', stateInviteToken);
-      return processInviteAndRedirect(req, res, stateInviteToken, userInfo);
-    }
-
-    console.log('[callback] No invite token present');
-
+    // Auto-select org if user belongs to only one
     if (memberships?.length === 1) {
-      req.session.orgId   = memberships[0].org_id;
-      req.session.orgName = memberships[0].orgs?.name;
-      req.session.mode    = 'org';
-      console.log('[callback] Auto-selected org:', memberships[0].org_id);
+      req.session.orgId =
+        memberships[0].org_id;
+
+      req.session.orgName =
+        memberships[0].orgs?.name;
+
+      req.session.mode = 'org';
     }
 
-    console.log('[callback] Redirecting to dashboard');
-
-    req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
+    req.session.save(() => {
+      res.redirect(
+        `${process.env.FRONTEND_URL}/`
+      );
+    });
 
   } catch (err) {
-    console.error('================ CALLBACK ERROR ================');
-    console.error(err);
-    console.error('STACK:', err.stack);
-    console.error('================================================');
-    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed`);
+    console.error(
+      '[callback] Error:',
+      err
+    );
+
+    res.redirect(
+      `${process.env.FRONTEND_URL}?error=auth_failed`
+    );
   }
 });
 
@@ -463,59 +269,6 @@ app.post('/refresh', requireAuth, async (req, res) => {
     console.error('Token refresh failed:', err.message);
     return res.status(401).json({ error: 'Session expired — please log in again.' });
   }
-});
-
-// ── Org: join via invite link ─────────────────────────────────────────────────
-
-app.get('/org/join/:token', checkClientReady, async (req, res) => {
-  const { token } = req.params;
-  const user      = req.session.userInfo;
-
-  if (!user) {
-    console.log('[join] Redirecting to login with token:', token);
-    return res.redirect(
-      `/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
-    );
-  }
-
-  const { data: invite, error } = await supabaseAdmin
-    .from('invite_tokens')
-    .select('*, orgs(*)')
-    .eq('token', token)
-    .single();
-
-  if (error || !invite)
-    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_invite`);
-
-  if (invite.expires_at && new Date(invite.expires_at) < new Date())
-    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=expired_invite`);
-
-  const { error: upsertErr } = await supabaseAdmin
-    .from('org_members')
-    .upsert(
-      {
-        org_id:   invite.org_id,
-        user_sub: user.sub,
-        email:    user.email,
-        role:     'member',
-      },
-      { onConflict: 'org_id,user_sub' }
-    );
-
-  if (upsertErr) {
-    console.error('[join] upsert failed:', upsertErr.message);
-    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=join_failed`);
-  }
-
-  req.session.orgId   = invite.org_id;
-  req.session.orgName = invite.orgs.name;
-  req.session.mode    = 'org';
-  req.session.memberships = [
-    ...(req.session.memberships || []).filter(m => m.org_id !== invite.org_id),
-    { org_id: invite.org_id, role: 'member', orgs: { id: invite.org_id, name: invite.orgs.name } },
-  ];
-
-  req.session.save(() => res.redirect(`${process.env.FRONTEND_URL}/dashboard`));
 });
 
 // ── Org: memberships ──────────────────────────────────────────────────────────
@@ -605,7 +358,7 @@ app.post('/org/create', requireAuth, async (req, res) => {
       { org_id: org.id, role: 'admin', orgs: { id: org.id, name: org.name } },
     ];
 
-    const inviteUrl = `${process.env.FRONTEND_URL}/org/join/${inviteToken}`;
+    const inviteUrl =`${process.env.FRONTEND_URL}/join?token=${inviteToken}`;
 
     req.session.save(() => res.json({ org, inviteToken, inviteUrl }));
   } catch (err) {
@@ -624,50 +377,74 @@ app.post('/org/invite', requireAdmin, async (req, res) => {
     created_by: req.session.userInfo.sub,
     expires_at: inviteExpiresAt(7),
   });
-  res.json({ inviteUrl: `${process.env.FRONTEND_URL}/org/join/${token}` });
+  res.json({ inviteUrl: `${process.env.FRONTEND_URL}/join?token=${token}` });
 });
 
 // ── Org: send invite email ────────────────────────────────────────────────────
+app.post("/org/join", requireAuth, async (req, res) => {
+  const { token } = req.body;
 
-app.post('/org/invite/email', requireAdmin, async (req, res) => {
-  const { email, inviteUrl } = req.body;
-  const orgName    = req.session.orgName              || 'SecureStream';
-  const senderName = req.session.userInfo?.given_name || 'A teammate';
+  const { data: invite, error } =
+    await supabaseAdmin
+      .from("invite_tokens")
+      .select("*, orgs(*)")
+      .eq("token", token)
+      .single();
 
-  if (!email || !inviteUrl)
-    return res.status(400).json({ error: 'Email and inviteUrl required' });
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
-    return res.status(500).json({ error: 'Email not configured on server' });
-
-  try {
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  if (error || !invite) {
+    return res.status(400).json({
+      error: "Invalid invite",
     });
-    const info = await transporter.sendMail({
-      from:    `"SecureStream" <${process.env.EMAIL_USER}>`,
-      to:      email,
-      subject: `${senderName} invited you to join ${orgName} on SecureStream`,
-      html: `
-        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">
-          <h2 style="font-size:20px;font-weight:700;margin:0 0 8px">You're invited</h2>
-          <p style="color:#6b7280;font-size:14px;margin:0 0 24px">
-            ${senderName} has invited you to join <strong>${orgName}</strong> on SecureStream.
-          </p>
-          <a href="${inviteUrl}"
-            style="display:inline-block;background:#185FA5;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-size:14px;font-weight:500">
-            Accept invitation
-          </a>
-          <p style="color:#9ca3af;font-size:12px;margin-top:24px">Link expires in 7 days.</p>
-        </div>
-      `,
-    });
-    res.json({ success: true, messageId: info.messageId });
-  } catch (err) {
-    console.error('EMAIL SEND ERROR:', err.message);
-    res.status(500).json({ error: err.message });
   }
+
+  if (
+    invite.expires_at &&
+    new Date(invite.expires_at) < new Date()
+  ) {
+    return res.status(400).json({
+      error: "Invite expired",
+    });
+  }
+
+  await supabaseAdmin
+    .from("org_members")
+    .upsert(
+      {
+        org_id: invite.org_id,
+        user_sub: req.session.userInfo.sub,
+        email: req.session.userInfo.email,
+        role: "member",
+      },
+      {
+        onConflict: "org_id,user_sub",
+      }
+    );
+
+  req.session.orgId = invite.org_id;
+  req.session.orgName = invite.orgs.name;
+  req.session.mode = "org";
+
+  req.session.memberships = [
+    ...(req.session.memberships || []).filter(
+      (m) => m.org_id !== invite.org_id
+    ),
+    {
+      org_id: invite.org_id,
+      role: "member",
+      orgs: {
+        id: invite.org_id,
+        name: invite.orgs.name,
+      },
+    },
+  ];
+
+  req.session.save(() => {
+    res.json({
+      success: true,
+    });
+  });
 });
+
 
 // ── Org: members ──────────────────────────────────────────────────────────────
 
