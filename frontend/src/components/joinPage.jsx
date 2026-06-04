@@ -32,7 +32,9 @@ export default function JoinPage({ user, authLoading }) {
     const redirectUrl = !user
       ? `${BACKEND}/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
       : `${BACKEND}/org/join/${token}`;
-
+    console.log("JOIN PAGE TOKEN:", token);
+    console.log("JOIN PAGE USER:", user);
+    console.log("REDIRECT URL:", redirectUrl);
     const t = setTimeout(() => {
       window.location.href = redirectUrl;
     }, 300);

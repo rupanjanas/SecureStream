@@ -504,8 +504,15 @@ app.get('/org/join/:token', checkClientReady, async (req, res) => {
   const user      = req.session.userInfo;
 
   if (!user) {
-    return res.redirect(`/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`);
-  }
+  console.log(
+    "[join] Redirecting to login with token:",
+    token
+  );
+
+  return res.redirect(
+    `/login?redirect=${encodeURIComponent(`/org/join/${token}`)}`
+  );
+}
 
   const { data: invite, error } = await supabaseAdmin
     .from('invite_tokens')
