@@ -1,189 +1,97 @@
 import { useEffect, useState } from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from "react-router-dom";
-import LandingPage         from "./components/landingPage";
-import OnboardingPage      from "./components/Onboarding";
-import OrgSetupPage        from "./components/OrgSetUp";
-import Dashboard           from "./components/Dashboard";
-import UploadPage          from "./components/UploadPage";
-import ChatPage            from "./components/ChatPage";
-import DocViewerPage       from "./components/DocViewer";
-import WorkspaceSelectPage from "./components/WorkSpaceSelect";
-import JoinPage            from "./components/joinPage";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+
+import LandingPage    from "./pages/LandingPage";
+import OnboardingPage from "./pages/OnboardingPage";
+import Dashboard      from "./pages/Dashboard";
+import UploadPage     from "./pages/UploadPage";
+import ChatPage       from "./pages/ChatPage";
+import DocViewerPage  from "./pages/DocViewerPage";
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 
-// ── ProtectedRoute ────────────────────────────────────────────────────────────
-function ProtectedRoute({ user, loading, children }) {
-  if (loading) return null;                      // wait — don't redirect prematurely
-  if (!user)   return <Navigate to="/" replace />;
-  return children;
-}
-
-// ── JoinOrgRedirect ───────────────────────────────────────────────────────────
-function JoinOrgRedirect() {
-  const { token } = useParams();
+function RequireAuth({ user, authLoading, children }) {
   useEffect(() => {
-    window.location.href = `${AUTH_URL}/org/join/${token}`;
-  }, [token]);
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <p className="text-sm text-gray-500">Joining workspace…</p>
-    </div>
-  );
-}
+    if (!authLoading && !user) {
+      window.location.href = `${AUTH_URL}/login`;
+    }
+  }, [user, authLoading]);
 
-// ── Loading spinner (inside Router so hooks always have context) ──────────────
-function LoadingScreen() {
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="flex gap-1.5">
-        {[0, 150, 300].map((d) => (
-          <span
-            key={d}
-            className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
-            style={{ animationDelay: `${d}ms` }}
-          />
-        ))}
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex gap-1.5">
+          {[0, 150, 300].map((d) => (
+            <span
+              key={d}
+              className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
+              style={{ animationDelay: `${d}ms` }}
+            />
+          ))}
+        </div>
       </div>
-    </div>
-  );
-}
-
-// ── isTokenExpired helper ────────────────────────────────────────────────────
-function isTokenExpired(token) {
-  try {
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.exp * 1000 < Date.now() + 30_000;
-  } catch {
-    return false;
+    );
   }
+
+  // While the redirect is in flight, render nothing
+  if (!user) return null;
+
+  return children;
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user,    setUser]    = useState(null);
-  const [orgId,   setOrgId]   = useState(null);
-  const [orgName, setOrgName] = useState(null);
-  const [mode,    setMode]    = useState(null);
-  const [loading, setLoading] = useState(true);  // authLoading
-  const [accessToken, setAccessToken] = useState(null); 
+  const [user,        setUser]        = useState(null);
+  const [accessToken, setAccessToken] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
-  // App.jsx — update the session fetch block:
-
-useEffect(() => {
-  const controller = new AbortController();
-  const timeout    = setTimeout(() => controller.abort(), 8000);
-
-  const initSession = async () => {
-    try {
-      const res  = await fetch(`${AUTH_URL}/`, {
-        credentials: "include",
-        signal:      controller.signal,
-      });
-      const data = await res.json();
-
-      if (!data.isAuthenticated) {
-        setLoading(false);
-        return;
-      }
-
-      // Check if token is already expired and refresh proactively
-      let accessToken = data.access_token;
-      if (accessToken && isTokenExpired(accessToken)) {
-        const refreshRes = await fetch(`${AUTH_URL}/refresh`, {
-          method:      "POST",
-          credentials: "include",
-        });
-        if (refreshRes.ok) {
-          const refreshed = await refreshRes.json();
-          accessToken = refreshed.access_token;
-        } else {
-          // Can't refresh — user needs to log in again
-          setLoading(false);
-          return;
+  useEffect(() => {
+    fetch(`${AUTH_URL}/`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.isAuthenticated) {
+          setUser(data.user);
+          setAccessToken(data.access_token || null);
         }
-      }
+      })
+      .catch(() => {})
+      .finally(() => setAuthLoading(false));
+  }, []);
 
-      setUser(data.user);
-      setMode(data.mode       || "personal");
-      setOrgId(data.orgId     || null);
-      setOrgName(data.orgName || null);
-      setAccessToken(accessToken);
-    } catch (err) {
-      if (err.name !== "AbortError") console.error("Session fetch failed:", err);
-    } finally {
-      clearTimeout(timeout);
-      setLoading(false);
-    }
-  };
+  const authedProps = { user, accessToken };
 
-  initSession();
-  return () => { clearTimeout(timeout); controller.abort(); };
-}, []);
-  // ── Router wraps EVERYTHING including the loading screen ──────────────────
-  // This guarantees useLocation/useNavigate always have a valid context,
-  // regardless of whether the session fetch has completed yet.
   return (
-    <Router>
-      {loading ? (
-        <LoadingScreen />
-      ) : (
-        <Routes>
-          <Route path="/"           element={<LandingPage />} />
-          <Route path="/onboarding" element={<OnboardingPage />} />
-          <Route path="/org-setup"  element={<OrgSetupPage />} />
+    <BrowserRouter>
+      <Routes>
+        {/* Public */}
+        <Route path="/"           element={<LandingPage />} />
+        <Route path="/onboarding" element={<OnboardingPage />} />
 
-          {/* Join routes — no auth required, JoinPage handles its own auth check */}
-          <Route path="/join"           element={
-            <JoinPage user={user} authLoading={loading} />
-          }/>
-          <Route path="/org/join/:token" element={<JoinOrgRedirect />} />
+        {/* Protected */}
+        <Route path="/dashboard" element={
+          <RequireAuth user={user} authLoading={authLoading}>
+            <Dashboard {...authedProps} />
+          </RequireAuth>
+        }/>
+        <Route path="/upload" element={
+          <RequireAuth user={user} authLoading={authLoading}>
+            <UploadPage {...authedProps} />
+          </RequireAuth>
+        }/>
+        <Route path="/chat" element={
+          <RequireAuth user={user} authLoading={authLoading}>
+            <ChatPage {...authedProps} />
+          </RequireAuth>
+        }/>
+        <Route path="/doc-viewer" element={
+          <RequireAuth user={user} authLoading={authLoading}>
+            <DocViewerPage {...authedProps} />
+          </RequireAuth>
+        }/>
 
-          {/* Protected routes */}
-          <Route path="/workspace-select" element={
-            <ProtectedRoute user={user} loading={loading}>
-              <WorkspaceSelectPage
-                setMode={setMode}
-                setOrgId={setOrgId}
-                setOrgName={setOrgName}
-              />
-            </ProtectedRoute>
-          }/>
-          <Route path="/dashboard" element={
-            <ProtectedRoute user={user} loading={loading}>
-              <Dashboard
-                user={user}
-                orgId={orgId}
-                orgName={orgName}
-                mode={mode}
-                accessToken={accessToken} 
-                setMode={setMode}
-                setOrgId={setOrgId}
-                setOrgName={setOrgName}
-              />
-            </ProtectedRoute>
-          }/>
-          <Route path="/upload" element={
-            <ProtectedRoute user={user} loading={loading}>
-              <UploadPage user={user} mode={mode} orgId={orgId} accessToken={accessToken} />
-            </ProtectedRoute>
-          }/>
-          <Route path="/chat" element={
-            <ProtectedRoute user={user} loading={loading}>
-              <ChatPage user={user} orgId={orgId} mode={mode} />
-            </ProtectedRoute>
-          }/>
-          <Route path="/doc-viewer" element={
-            <ProtectedRoute user={user} loading={loading}>
-              <DocViewerPage user={user} mode={mode} orgName={orgName} accessToken={accessToken}  />
-            </ProtectedRoute>
-          }/>
-
-          {/* Fallbacks */}
-          <Route path="/login" element={<Navigate to="/" replace />} />
-          <Route path="*"      element={<Navigate to="/" replace />} />
-        </Routes>
-      )}
-    </Router>
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }

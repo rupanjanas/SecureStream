@@ -4,15 +4,14 @@ import Navbar from "../components/Navbar";
 import { uploadDocument, getSession } from "../api/aiService";
 import { storeFile } from "../utils/filestore";
 
-export default function UploadPage({ user, mode, orgId }) {
-  const [dragging, setDragging]   = useState(false);
-  const [file, setFile]           = useState(null);
-  const [status, setStatus]       = useState(null);
-  const [result, setResult]       = useState(null);
-  const [error, setError]         = useState(null);
-  const inputRef                  = useRef(null);
-  const navigate                  = useNavigate();
-  const effectiveOrgId = mode === "org" ? orgId : null;
+export default function UploadPage({ user }) {
+  const [dragging, setDragging] = useState(false);
+  const [file,     setFile]     = useState(null);
+  const [status,   setStatus]   = useState(null); // null | "uploading" | "done" | "error"
+  const [result,   setResult]   = useState(null);
+  const [error,    setError]    = useState(null);
+  const inputRef  = useRef(null);
+  const navigate  = useNavigate();
 
   const handleFile = (f) => {
     if (!f) return;
@@ -50,29 +49,21 @@ export default function UploadPage({ user, mode, orgId }) {
         });
       }
 
-      // Get token
       const session = await getSession();
       const token   = session?.access_token || "dev-token";
+      const data    = await uploadDocument(file, token);
 
-      // Upload — pass orgId so ingest scopes correctly
-      const data = await uploadDocument(file, token, effectiveOrgId);
       setResult(data);
       setStatus("done");
 
       setTimeout(() => {
-        if (isPDF) {
-          // For personal mode: store file object for blob URL in viewer
-          // For org mode:      the viewer will use data.file_url from storage
-          if (mode !== "org") storeFile(file);
-        }
-
+        if (isPDF && !data.file_url) storeFile(file);
         navigate("/doc-viewer", {
           state: {
             docName:  file.name,
             docText:  isPDF ? "" : docText,
-            file_url: data.file_url || null,   // ← remote URL from Supabase Storage
-            fromDashboard: false,
-          }
+            file_url: data.file_url || null,
+          },
         });
       }, 1200);
     } catch (err) {
@@ -93,9 +84,7 @@ export default function UploadPage({ user, mode, orgId }) {
           </button>
           <h1 className="text-2xl font-bold text-gray-900">Upload document</h1>
           <p className="text-sm text-gray-400 mt-1">
-            {mode === "org"
-              ? "Document will be shared with your entire organisation."
-              : "Document will be stored in your private workspace."}
+            PDF or TXT · up to 10 MB · stored in your private workspace
           </p>
         </div>
 
@@ -113,8 +102,8 @@ export default function UploadPage({ user, mode, orgId }) {
               : "border-gray-200 bg-white hover:border-gray-300"
           }`}
         >
-          <input ref={inputRef} type="file" accept=".pdf,.txt"
-            className="hidden" onChange={(e) => handleFile(e.target.files[0])} />
+          <input ref={inputRef} type="file" accept=".pdf,.txt" className="hidden"
+            onChange={(e) => handleFile(e.target.files[0])} />
 
           {file ? (
             <>
@@ -159,7 +148,6 @@ export default function UploadPage({ user, mode, orgId }) {
             <p className="text-sm font-semibold text-emerald-700 mb-1">Ingested successfully</p>
             <p className="text-xs text-emerald-600">
               {result.chunks_stored} chunks stored · "{result.doc_name}"
-              {mode === "org" && " · shared with org"}
             </p>
           </div>
         )}
@@ -180,12 +168,6 @@ export default function UploadPage({ user, mode, orgId }) {
             </>
           ) : "Upload and embed"}
         </button>
-
-        <p className="text-xs text-gray-400 text-center mt-3">
-          {mode === "org"
-            ? "Shared with your organisation. Members can view and query this document."
-            : "Private to your account. Only you can access this document."}
-        </p>
       </main>
     </div>
   );

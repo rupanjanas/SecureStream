@@ -1,144 +1,74 @@
-import { useEffect, useState } from "react";
-import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
+import { useEffect, useState} from "react";
+import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { getHealth, listDocuments } from "../api/aiService";
 
-export default function Dashboard({ user, orgId, orgName, mode, accessToken, setMode, setOrgId, setOrgName }) {
-  const navigate     = useNavigate();
-  const location     = useLocation();
-  const [searchParams, setSearchParams] = useSearchParams();
+export default function Dashboard({ user, accessToken }) {
+  const navigate = useNavigate();
 
   const [health,      setHealth]      = useState(null);
   const [docs,        setDocs]        = useState([]);
-  const [docsLoading, setDocsLoading] = useState(true);
-  const [inviteError, setInviteError] = useState(() => searchParams.get("error"));
-
-  // Clear the ?error= param from the URL immediately so refresh doesn't re-show it
-  useEffect(() => {
-    if (searchParams.get("error")) {
-      setSearchParams((p) => { p.delete("error"); return p; }, { replace: true });
-    }
-  }, [searchParams, setSearchParams]);
-
-  // When redirected here after joining an org via invite link,
-  // re-fetch the session so the org context is reflected immediately
-  useEffect(() => {
-    const { joinedOrg } = location.state || {};
-    if (!joinedOrg) return;
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.isAuthenticated) {
-          setMode(d.mode);
-          setOrgId(d.orgId);
-          setOrgName(d.orgName);
-        }
-      });
-    window.history.replaceState({}, "", "/dashboard");
-  }, [location.state, setMode, setOrgId, setOrgName]);
+  const [docsLoading, setDocsLoading] = useState(Boolean(accessToken));
 
   useEffect(() => {
-    getHealth().then(setHealth).catch(() => setHealth({ status: "error" }));
+    getHealth()
+      .then(setHealth)
+      .catch(() => setHealth({ status: "error" }));
   }, []);
 
   useEffect(() => {
-    const loadDocs = async () => {
-      if (!accessToken) return;
+    if (!accessToken) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    // Start loading — wrapped in a function so it's one logical operation
+    const load = async () => {
       setDocsLoading(true);
-      setDocs([]);
       try {
-        const effectiveOrgId = mode === "org" ? orgId : null;
-        const data = await listDocuments(accessToken, effectiveOrgId);
-        setDocs(data.documents || []);
+        const data = await listDocuments(accessToken);
+        if (!controller.signal.aborted) {
+          setDocs(data.documents || []);
+        }
       } catch {
-        setDocs([]);
+        if (!controller.signal.aborted) {
+          setDocs([]);
+        }
       } finally {
-        setDocsLoading(false);
+        if (!controller.signal.aborted) {
+          setDocsLoading(false);
+        }
       }
     };
-    loadDocs();
-  }, [orgId, accessToken, mode]);
+
+    load();
+    return () => controller.abort();
+  }, [accessToken]);
 
   const aiOnline = health?.status === "ok";
-  const dbOnline = health?.db    === "connected";
+  const dbOnline = health?.db     === "connected";
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
-      {/* ── Invite error toast ─────────────────────────────────────────────── */}
-      {inviteError && (
-        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3
-          px-4 py-3 rounded-2xl shadow-lg text-sm font-medium max-w-sm w-full mx-4 ${
-          inviteError === "expired_invite"
-            ? "bg-amber-50 border border-amber-200 text-amber-800"
-            : "bg-red-50 border border-red-200 text-red-800"
-        }`}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="8"  x2="12"    y2="12"/>
-            <line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          <span className="flex-1">
-            {inviteError === "expired_invite"
-              ? "This invite link has expired. Ask the org admin to send a new one."
-              : "This invite link is invalid or not found."}
-          </span>
-          <button
-            onClick={() => setInviteError(null)}
-            className="flex-shrink-0 opacity-50 hover:opacity-100 transition-opacity"
-            aria-label="Dismiss"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6"  y2="18"/>
-              <line x1="6"  y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-      )}
-
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-10">
 
-        {/* ── Header ─────────────────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <h1 className="text-2xl font-bold text-gray-900">
-                {user?.given_name ? `Welcome back, ${user.given_name}` : "Dashboard"}
-              </h1>
-              {mode && (
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                  mode === "org"
-                    ? "bg-emerald-50 text-emerald-700"
-                    : "bg-blue-50 text-blue-700"
-                }`}>
-                  {mode === "org" ? `Org: ${orgName}` : "Personal"}
-                </span>
-              )}
-            </div>
-            <p className="text-sm text-gray-400">
-              {mode === "org"
-                ? "Shared workspace — documents visible to all org members"
-                : "Personal workspace — your private documents"}
-            </p>
-          </div>
-          <button
-            onClick={() => navigate("/workspace-select")}
-            className="text-xs text-gray-400 hover:text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Switch workspace
-          </button>
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-2xl font-bold text-gray-900">
+            {user?.given_name ? `Welcome back, ${user.given_name}` : "Dashboard"}
+          </h1>
+          <p className="text-sm text-gray-400 mt-1">Your documents and AI assistant</p>
         </div>
 
-        {/* ── Status cards ───────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        {/* Status cards */}
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
           {[
-            { label: "Documents",  value: docs.length,                          color: "text-[#185FA5]"   },
-            { label: "AI service", value: aiOnline ? "Online"    : "Offline",   color: aiOnline ? "text-emerald-600" : "text-red-500" },
-            { label: "Vector DB",  value: dbOnline ? "Connected" : "Error",     color: dbOnline ? "text-emerald-600" : "text-red-500" },
-            { label: "Workspace",  value: mode === "org" ? "Shared" : "Private", color: "text-violet-600" },
+            { label: "Documents",  value: docs.length,                       color: "text-[#185FA5]" },
+            { label: "AI service", value: aiOnline ? "Online"    : "Offline", color: aiOnline ? "text-emerald-600" : "text-red-500" },
+            { label: "Vector DB",  value: dbOnline ? "Connected" : "Error",   color: dbOnline ? "text-emerald-600" : "text-red-500" },
           ].map((s) => (
             <div key={s.label} className="bg-white border border-gray-100 rounded-xl p-5">
               <p className="text-xs text-gray-400 mb-1">{s.label}</p>
@@ -147,7 +77,7 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
           ))}
         </div>
 
-        {/* ── Documents list ─────────────────────────────────────────────────── */}
+        {/* Documents list */}
         <div className="bg-white border border-gray-100 rounded-xl mb-6">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
             <h3 className="text-sm font-semibold text-gray-700">Your documents</h3>
@@ -229,7 +159,7 @@ export default function Dashboard({ user, orgId, orgName, mode, accessToken, set
           )}
         </div>
 
-        {/* ── Quick actions ───────────────────────────────────────────────────── */}
+        {/* Quick actions */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <button onClick={() => navigate("/upload")}
             className="bg-white border border-gray-100 rounded-xl p-5 text-left hover:border-blue-200 hover:shadow-sm transition-all group">

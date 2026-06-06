@@ -19,10 +19,7 @@ from starlette.responses import StreamingResponse
 
 from app.auth import verify_token
 from app.config import settings
-from app.db import (
-    close_http, db_get, db_insert, db_patch, db_test, db_upsert,
-    db_verify_org_membership,
-)
+from app.db import close_http, db_get, db_insert, db_patch, db_test, db_upsert
 from app.ingest import ingest_document
 from app.models import IngestResponse, QueryRequest
 from app.query import RAG_PROMPT, build_context, retrieve, save_query_log
@@ -113,7 +110,7 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 
 
-# ── Org ID resolution ─────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 class ChatHistoryBody(BaseModel):
     doc_name: str
@@ -121,49 +118,12 @@ class ChatHistoryBody(BaseModel):
     sources:  list[Any]
 
 
-async def resolve_org_id(
-    claims:   dict,
-    x_org_id: str = "",
-) -> str:
-    """
-    Determine the effective org_id for this request.
-
-    BUG FIX — org/personal separation:
-    The previous implementation either:
-      (a) always used JWT sub — so org docs were stored under user.sub and
-          appeared in personal workspace too, OR
-      (b) blindly trusted X-Org-Id header — any caller could forge it
-
-    CORRECT APPROACH:
-    - If X-Org-Id header is present AND non-empty:
-        Validate the user is actually a member of that org in Supabase.
-        If yes → use the org_id (documents scoped to the org).
-        If no  → reject with 403 (user is not a member of claimed org).
-    - If X-Org-Id header is absent or empty:
-        Use JWT sub → personal workspace.
-
-    This is secure because:
-      1. JWT is verified before this function is called (verify_token runs first)
-      2. org membership is cross-checked against the database
-      3. A forged X-Org-Id will fail the membership check
-    """
-    user_sub = claims.get("sub", "").strip()
-    if not user_sub:
+def get_user_id(claims: dict) -> str:
+    """Extract user identity from verified JWT claims. Always the JWT sub."""
+    uid = claims.get("sub", "").strip()
+    if not uid:
         raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
-
-    candidate_org = x_org_id.strip()
-    if not candidate_org:
-        # No org header → personal workspace
-        return user_sub
-
-    # Validate membership before trusting the header
-    is_member = await db_verify_org_membership(user_sub, candidate_org)
-    if not is_member:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not a member of the specified organisation",
-        )
-    return candidate_org
+    return uid
 
 
 ALLOWED_MIME = {"application/pdf", "text/plain"}
@@ -183,9 +143,8 @@ async def ingest(
     file:     UploadFile = File(...),
     claims:   dict       = Depends(verify_token),
     x_domain: str        = Header(default="general"),
-    x_org_id: str        = Header(default=""),
 ):
-    org_id = await resolve_org_id(claims, x_org_id)
+    user_id = get_user_id(claims)
 
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
@@ -195,7 +154,7 @@ async def ingest(
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB} MB limit")
 
     safe_filename = os.path.basename(file.filename or "upload").replace("..", "")
-    result = await ingest_document(file_bytes, safe_filename, org_id, domain=x_domain)
+    result = await ingest_document(file_bytes, safe_filename, user_id, domain=x_domain)
 
     if result["chunks_stored"] == 0 and result["message"] not in ("No content extracted",):
         raise HTTPException(status_code=422, detail=result["message"])
@@ -205,16 +164,15 @@ async def ingest(
 
 @app.post("/query/stream")
 async def query_stream(
-    body:     QueryRequest,
-    claims:   dict = Depends(verify_token),
-    x_org_id: str  = Header(default=""),
+    body:   QueryRequest,
+    claims: dict = Depends(verify_token),
 ):
-    org_id = await resolve_org_id(claims, x_org_id)
-    logger.info("[SSE] question=%r org=%s doc=%r", body.question, org_id, body.doc_name)
+    user_id = get_user_id(claims)
+    logger.info("[SSE] question=%r user=%s doc=%r", body.question, user_id, body.doc_name)
 
     combined = await retrieve(
         question=body.question,
-        org_id=org_id,
+        org_id=user_id,
         doc_name=body.doc_name or "",
         top_k=body.top_k,
     )
@@ -275,7 +233,7 @@ async def query_stream(
 
         yield f"data: {json.dumps({'done': True, 'sources': unique_sources, 'source_passages': source_passages})}\n\n"
         asyncio.create_task(
-            save_query_log(org_id, body.question, "".join(full_answer), source_passages)
+            save_query_log(user_id, body.question, "".join(full_answer), source_passages)
         )
 
     return StreamingResponse(
@@ -286,13 +244,10 @@ async def query_stream(
 
 
 @app.get("/documents")
-async def list_documents(
-    claims:   dict = Depends(verify_token),
-    x_org_id: str  = Header(default=""),
-):
-    org_id = await resolve_org_id(claims, x_org_id)
-    data   = await db_get("documents", {
-        "org_id": f"eq.{org_id}",
+async def list_documents(claims: dict = Depends(verify_token)):
+    user_id = get_user_id(claims)
+    data    = await db_get("documents", {
+        "org_id": f"eq.{user_id}",
         "select": "doc_name,created_at,metadata,file_url",
         "order":  "created_at.desc",
     })
@@ -310,18 +265,14 @@ async def list_documents(
                 "file_url":   d.get("file_url") or meta.get("file_url"),
                 "domain":     meta.get("domain", "general"),
             })
-    return {"documents": docs, "org_id": org_id}
+    return {"documents": docs}
 
 
 @app.get("/documents/file-url")
-async def get_document_file_url(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-    x_org_id: str  = Header(default=""),
-):
-    org_id = await resolve_org_id(claims, x_org_id)
-    rows   = await db_get("documents", {
-        "org_id":   f"eq.{org_id}",
+async def get_document_file_url(doc_name: str, claims: dict = Depends(verify_token)):
+    user_id = get_user_id(claims)
+    rows    = await db_get("documents", {
+        "org_id":   f"eq.{user_id}",
         "doc_name": f"eq.{doc_name}",
         "select":   "file_url,metadata",
         "limit":    "1",
@@ -339,13 +290,12 @@ async def get_document_file_url(
 async def get_document_text(
     doc_name:  str,
     claims:    dict = Depends(verify_token),
-    x_org_id:  str  = Header(default=""),
     page:      int  = 1,
     page_size: int  = 50,
 ):
-    org_id = await resolve_org_id(claims, x_org_id)
-    chunks = await db_get("documents", {
-        "org_id":   f"eq.{org_id}",
+    user_id = get_user_id(claims)
+    chunks  = await db_get("documents", {
+        "org_id":   f"eq.{user_id}",
         "doc_name": f"eq.{doc_name}",
         "select":   "chunk_text,metadata",
         "order":    "metadata->chunk_index.asc",
@@ -363,15 +313,11 @@ async def get_document_text(
 
 
 @app.get("/chat-history/{doc_name}")
-async def get_chat_history(
-    doc_name: str,
-    claims:   dict = Depends(verify_token),
-    x_org_id: str  = Header(default=""),
-):
-    org_id = await resolve_org_id(claims, x_org_id)
+async def get_chat_history(doc_name: str, claims: dict = Depends(verify_token)):
+    user_id = get_user_id(claims)
     try:
         data = await db_get("chat_history", {
-            "org_id":   f"eq.{org_id}",
+            "org_id":   f"eq.{user_id}",
             "doc_name": f"eq.{doc_name}",
             "select":   "messages,sources",
             "limit":    "1",
@@ -388,11 +334,10 @@ async def get_chat_history(
 
 @app.post("/chat-history")
 async def save_chat_history(
-    body:     ChatHistoryBody,
-    claims:   dict = Depends(verify_token),
-    x_org_id: str  = Header(default=""),
+    body:   ChatHistoryBody,
+    claims: dict = Depends(verify_token),
 ):
-    org_id  = await resolve_org_id(claims, x_org_id)
+    user_id = get_user_id(claims)
     now_iso = datetime.now(timezone.utc).isoformat()
     payload = {
         "messages":   body.messages,
@@ -403,7 +348,7 @@ async def save_chat_history(
     try:
         patched = await db_patch(
             "chat_history",
-            filters={"org_id": org_id, "doc_name": body.doc_name},
+            filters={"org_id": user_id, "doc_name": body.doc_name},
             data=payload,
         )
         if patched:
@@ -413,7 +358,7 @@ async def save_chat_history(
 
     rows = await db_upsert(
         "chat_history",
-        [{"org_id": org_id, "doc_name": body.doc_name, **payload}],
+        [{"org_id": user_id, "doc_name": body.doc_name, **payload}],
         on_conflict="org_id,doc_name",
     )
     if not rows:

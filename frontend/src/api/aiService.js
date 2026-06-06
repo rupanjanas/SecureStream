@@ -1,7 +1,8 @@
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 const AI_URL   = import.meta.env.VITE_AI_SERVICE_URL;
 
-// ── Session ────────────────────────────────────────────────────────────────────
+// ── Session ───────────────────────────────────────────────────────────────────
+
 export async function getSession() {
   try {
     const res = await fetch(`${AUTH_URL}/`, { credentials: "include" });
@@ -12,7 +13,6 @@ export async function getSession() {
     if (data.access_token && isTokenExpired(data.access_token)) {
       return await refreshSession();
     }
-
     return data.access_token ? data : null;
   } catch {
     return null;
@@ -53,7 +53,8 @@ async function getFreshToken() {
   return session.access_token;
 }
 
-// ── Health ─────────────────────────────────────────────────────────────────────
+// ── Health ────────────────────────────────────────────────────────────────────
+
 export async function getHealth() {
   try {
     const res = await fetch(`${AI_URL}/health`);
@@ -64,21 +65,17 @@ export async function getHealth() {
   }
 }
 
-// ── Upload / Ingest ────────────────────────────────────────────────────────────
-export async function uploadDocument(file, token, orgId = null) {
+// ── Upload / Ingest ───────────────────────────────────────────────────────────
+
+export async function uploadDocument(file, token) {
   if (!token) throw new Error("No access token — cannot upload");
 
   const formData = new FormData();
   formData.append("file", file);
 
-  const headers = { Authorization: `Bearer ${token}` };
-  if (orgId && typeof orgId === "string" && orgId.trim()) {
-    headers["X-Org-Id"] = orgId.trim();
-  }
-
   const res = await fetch(`${AI_URL}/ingest`, {
     method:  "POST",
-    headers,
+    headers: { Authorization: `Bearer ${token}` },
     body:    formData,
   });
 
@@ -89,22 +86,17 @@ export async function uploadDocument(file, token, orgId = null) {
   return res.json();
 }
 
-// ── List Documents ─────────────────────────────────────────────────────────────
-export async function listDocuments(token, orgId = null) {
+// ── List Documents ────────────────────────────────────────────────────────────
+
+export async function listDocuments(token) {
   if (!token || isTokenExpired(token)) {
     const session = await getSession();
     token = session?.access_token;
   }
   if (!token) return { documents: [] };
 
-  const headers = { Authorization: `Bearer ${token}` };
-  // FIX: Same guard as uploadDocument — only set header for real org IDs.
-  if (orgId && typeof orgId === "string" && orgId.trim()) {
-    headers["X-Org-Id"] = orgId.trim();
-  }
-
   const res = await fetch(`${AI_URL}/documents`, {
-    headers,
+    headers:     { Authorization: `Bearer ${token}` },
     credentials: "include",
   });
 
@@ -115,48 +107,38 @@ export async function listDocuments(token, orgId = null) {
   return res.json();
 }
 
-// ── Get Document Text ──────────────────────────────────────────────────────────
-export async function getDocumentText(docName, token, orgId = null) {
-  if (!token || !docName) return { text: "" };
+// ── Get Document Text ─────────────────────────────────────────────────────────
 
-  const headers = { Authorization: `Bearer ${token}` };
-  if (orgId && typeof orgId === "string" && orgId.trim()) {
-    headers["X-Org-Id"] = orgId.trim();
-  }
+export async function getDocumentText(docName, token) {
+  if (!token || !docName) return { text: "" };
 
   const res = await fetch(
     `${AI_URL}/documents/${encodeURIComponent(docName)}/text`,
-    { headers, credentials: "include" }
+    { headers: { Authorization: `Bearer ${token}` }, credentials: "include" }
   );
 
   if (!res.ok) return { text: "" };
   return res.json();
 }
 
-// ── Streaming Q&A ──────────────────────────────────────────────────────────────
+// ── Streaming Q&A ─────────────────────────────────────────────────────────────
+
 export async function askQuestionStream(
   question,
   docName,
   chatHistory,
   onToken,
   onDone,
-  topK  = 5,
-  orgId = null,
+  topK = 5,
 ) {
   const token = await getFreshToken();
-  if (!token) throw new Error("Session expired — please log in again.");
-
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization:  `Bearer ${token}`,
-  };
-  if (orgId && typeof orgId === "string" && orgId.trim()) {
-    headers["X-Org-Id"] = orgId.trim();
-  }
 
   const res = await fetch(`${AI_URL}/query/stream`, {
-    method:  "POST",
-    headers,
+    method:      "POST",
+    headers:     {
+      "Content-Type": "application/json",
+      Authorization:  `Bearer ${token}`,
+    },
     credentials: "include",
     body: JSON.stringify({
       question,
@@ -196,22 +178,14 @@ export async function askQuestionStream(
   }
 }
 
-// ── Shared Chat History ────────────────────────────────────────────────────────
-// Stored in Supabase per (org_id, doc_name) so all org members see the same
+// ── Chat History ──────────────────────────────────────────────────────────────
 
-export async function getSharedChatHistory(docName, token, orgId) {
-  if (!token || !docName || !orgId) return { messages: [], sources: [] };
-
+export async function getChatHistory(docName, token) {
+  if (!token || !docName) return { messages: [], sources: [] };
   try {
     const res = await fetch(
       `${AI_URL}/chat-history/${encodeURIComponent(docName)}`,
-      {
-        credentials: "include",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "X-Org-Id":    orgId,
-        },
-      }
+      { credentials: "include", headers: { Authorization: `Bearer ${token}` } }
     );
     if (!res.ok) return { messages: [], sources: [] };
     return res.json();
@@ -220,17 +194,14 @@ export async function getSharedChatHistory(docName, token, orgId) {
   }
 }
 
-export async function saveSharedChatHistory(docName, messages, sources, token, orgId) {
-  if (!token || !docName || !orgId) return;
-
-  // Fire-and-forget — never blocks the UI
+export async function saveChatHistory(docName, messages, sources, token) {
+  if (!token || !docName) return;
   fetch(`${AI_URL}/chat-history`, {
     method:      "POST",
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Authorization:  `Bearer ${token}`,
-      "X-Org-Id":     orgId,
     },
     body: JSON.stringify({ doc_name: docName, messages, sources }),
   }).catch((err) => console.warn("[chat-history] save failed:", err));
