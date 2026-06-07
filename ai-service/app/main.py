@@ -18,6 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
 
 from app.auth import verify_token
+from app.cache import get_cached, get_semantic_cache, set_cached, set_semantic_cache
 from app.config import settings
 from app.db import close_http, db_get, db_insert, db_patch, db_test, db_upsert
 from app.ingest import ingest_document
@@ -28,7 +29,9 @@ from app.ratelimit import check_rate_limit
 logger = logging.getLogger(__name__)
 
 
-# ── Lifespan ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -62,7 +65,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 
-# ── Rate limiting ─────────────────────────────────────────────────────────────
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -110,8 +112,6 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 class ChatHistoryBody(BaseModel):
     doc_name: str
     messages: list[Any]
@@ -119,7 +119,6 @@ class ChatHistoryBody(BaseModel):
 
 
 def get_user_id(claims: dict) -> str:
-    """Extract user identity from verified JWT claims. Always the JWT sub."""
     uid = claims.get("sub", "").strip()
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
@@ -130,7 +129,6 @@ ALLOWED_MIME = {"application/pdf", "text/plain"}
 MAX_FILE_MB  = 10
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -170,13 +168,53 @@ async def query_stream(
     user_id = get_user_id(claims)
     logger.info("[SSE] question=%r user=%s doc=%r", body.question, user_id, body.doc_name)
 
-    combined = await retrieve(
+    # ------------------------------------------------------------------
+    # Layer 1: exact cache — MD5 of the question, no embedding needed.
+    # ------------------------------------------------------------------
+    cached = await get_cached(user_id, body.question)
+    if cached:
+        logger.info("[SSE] exact cache HIT user=%s", user_id)
+
+        async def stream_cached_exact():
+            answer = cached.get("answer", "")
+            # Stream the cached answer token-by-token so the UI behaves
+            # identically whether the answer is live or cached.
+            for word in answer.split(" "):
+                yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'sources': cached.get('sources', []), 'source_passages': cached.get('source_passages', [])})}\n\n"
+
+        return StreamingResponse(stream_cached_exact(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ------------------------------------------------------------------
+    # Retrieval — also returns the query vector produced during vector
+    # search so we can (a) check semantic cache and (b) write it back
+    # later without a second Jina round-trip.
+    # ------------------------------------------------------------------
+    combined, query_vector = await retrieve(
         question=body.question,
         org_id=user_id,
         doc_name=body.doc_name or "",
         top_k=body.top_k,
     )
 
+    if query_vector:
+        sem_cached = await get_semantic_cache(user_id, query_vector)
+        if sem_cached:
+            logger.info("[SSE] semantic cache HIT user=%s", user_id)
+
+            async def stream_cached_semantic():
+                answer = sem_cached.get("answer", "")
+                for word in answer.split(" "):
+                    yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'sources': sem_cached.get('sources', []), 'source_passages': sem_cached.get('source_passages', [])})}\n\n"
+
+            return StreamingResponse(stream_cached_semantic(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ------------------------------------------------------------------
+    # No cache hit — full pipeline.
+    # ------------------------------------------------------------------
     if not combined:
         async def empty():
             yield f"data: {json.dumps({'token': 'No relevant content found in the document.', 'done': False})}\n\n"
@@ -232,8 +270,28 @@ async def query_stream(
             yield f"data: {json.dumps({'token': f'Error: {exc}', 'done': False})}\n\n"
 
         yield f"data: {json.dumps({'done': True, 'sources': unique_sources, 'source_passages': source_passages})}\n\n"
+        full_answer_str = "".join(full_answer)
+
+        result_to_cache = {
+            "answer":          full_answer_str,
+            "sources":         unique_sources,
+            "source_passages": source_passages,
+        }
+
+        # Exact cache — synchronous write in a background task.
         asyncio.create_task(
-            save_query_log(user_id, body.question, "".join(full_answer), source_passages)
+            set_cached(user_id, body.question, result_to_cache, ttl=300)
+        )
+
+        # Semantic cache — only if we have the query vector from retrieval.
+        if query_vector:
+            asyncio.create_task(
+                set_semantic_cache(user_id, body.question, query_vector, result_to_cache, ttl=300)
+            )
+
+        # Query log.
+        asyncio.create_task(
+            save_query_log(user_id, body.question, full_answer_str, source_passages)
         )
 
     return StreamingResponse(
