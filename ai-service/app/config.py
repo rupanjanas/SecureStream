@@ -46,3 +46,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+print("Redis URL:", settings.redis_url)
