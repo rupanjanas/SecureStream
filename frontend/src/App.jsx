@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
-import LandingPage    from "./pages/LandingPage";
-import OnboardingPage from "./pages/OnboardingPage";
-import Dashboard      from "./pages/Dashboard";
-import UploadPage     from "./pages/UploadPage";
-import ChatPage       from "./pages/ChatPage";
-import DocViewerPage  from "./pages/DocViewerPage";
+import LandingPage    from "./components/LandingPage";
+import OnboardingPage from "./components/OnboardingPage";
+import Dashboard      from "./components/Dashboard";
+import UploadPage     from "./components/UploadPage";
+import ChatPage       from "./components/ChatPage";
+import DocViewerPage  from "./components/DocViewerPage";
 
 const AUTH_URL = import.meta.env.VITE_BACKEND_URL;
 
