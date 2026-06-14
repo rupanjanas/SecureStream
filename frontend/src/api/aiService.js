@@ -178,7 +178,7 @@ export async function askQuestionStream(
   }
 }
 
-// ── Chat History ──────────────────────────────────────────────────────────────
+// ── Chat History (Supabase-backed via AI service) ─────────────────────────────
 
 export async function getChatHistory(docName, token) {
   if (!token || !docName) return { messages: [], sources: [] };

@@ -1,20 +1,15 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Document, Page, pdfjs } from "react-pdf";
 import Navbar from "../components/Navbar";
 import { retrieveFile } from "../utils/filestore";
-import {
-  getOrgMembers,
-  getOnlineMembers,
-  pingPresence,
-} from "../api/orgService";
 import "react-pdf/dist/Page/TextLayer.css";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   askQuestionStream,
   getDocumentText,
-  getSharedChatHistory,
-  saveSharedChatHistory,
+  getChatHistory,
+  saveChatHistory,
 } from "../api/aiService";
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
@@ -22,18 +17,9 @@ const AUTH_URL          = import.meta.env.VITE_BACKEND_URL;
 const HIGHLIGHT_COLOR   = "#FEF08A";
 const ANNOTATION_COLORS = ["#FCD34D", "#86EFAC", "#93C5FD", "#F9A8D4", "#C4B5FD"];
 
-function chatKey(docName)    { return `chat_v2_${docName}`; }
-function sourcesKey(docName) { return `sources_v2_${docName}`; }
-
-function loadFromStorage(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
-}
-
-function saveToStorage(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) { void error; }
+function fmtTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function escapeRegex(str) {
@@ -54,59 +40,7 @@ function highlightText(text, phrases) {
   }
 }
 
-function getInitials(email) {
-  if (!email) return "?";
-  const name  = email.split("@")[0];
-  const parts = name.split(/[._-]/);
-  return parts.length >= 2
-    ? (parts[0][0] + parts[1][0]).toUpperCase()
-    : name.slice(0, 2).toUpperCase();
-}
-
-function getAvatarColor(email) {
-  const palettes = [
-    "bg-blue-100 text-blue-700",
-    "bg-violet-100 text-violet-700",
-    "bg-emerald-100 text-emerald-700",
-    "bg-amber-100 text-amber-700",
-    "bg-pink-100 text-pink-700",
-    "bg-teal-100 text-teal-700",
-  ];
-  let h = 0;
-  for (const c of (email || "")) h = c.charCodeAt(0) + h * 31;
-  return palettes[Math.abs(h) % palettes.length];
-}
-
-function fmtTime(ts) {
-  if (!ts) return "";
-  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function MemberAvatar({ member, isOnline, isCurrent }) {
-  const [showTip, setShowTip] = useState(false);
-  return (
-    <div
-      className="relative"
-      onMouseEnter={() => setShowTip(true)}
-      onMouseLeave={() => setShowTip(false)}
-    >
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold border-2 ${
-        getAvatarColor(member.email)
-      } ${isCurrent ? "border-[#185FA5]" : "border-white"}`}>
-        {getInitials(member.email)}
-      </div>
-      <span className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-white ${
-        isOnline ? "bg-emerald-400" : "bg-gray-300"
-      }`} />
-      {showTip && (
-        <div className="absolute top-9 right-0 z-50 bg-gray-900 text-white text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">
-          <p className="font-medium">{member.email?.split("@")[0]}</p>
-          <p className="text-gray-400 capitalize">{member.role} · {isOnline ? "Online" : "Offline"}</p>
-        </div>
-      )}
-    </div>
-  );
-}
+// ── Sources history side panel ────────────────────────────────────────────────
 
 function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   const groups        = [...sourcesHistory].reverse();
@@ -241,224 +175,9 @@ function SourcesPanel({ sourcesHistory, isPDF, pageRefs, onClose }) {
   );
 }
 
-function InviteModal({ orgName, onClose, token }) {
-  const [copied, setCopied]           = useState(false);
-  const [inviteLink, setInviteLink]   = useState("");
-  const [linkLoading, setLinkLoading] = useState(true);
-  const [linkError, setLinkError]     = useState("");
+// ── Main page ─────────────────────────────────────────────────────────────────
 
-  const fetchInviteLink = useCallback(() => {
-    if (!token) {
-      setLinkError("Authentication not ready. Please close and reopen.");
-      setLinkLoading(false);
-      return;
-    }
-    // FIX: added credentials: "include" so the session cookie is sent —
-    // requireAdmin reads req.session, not the Authorization header.
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/org/invite`, {
-      method:      "POST",
-      credentials: "include",
-      headers:     { "Content-Type": "application/json" },
-    })
-      .then((r) => {
-        if (!r.ok) throw new Error(`Server returned ${r.status}`);
-        return r.json();
-      })
-      .then((d) => {
-        if (!d.inviteUrl) throw new Error("No inviteUrl in response");
-        setInviteLink(d.inviteUrl);
-        setLinkError("");
-        setLinkLoading(false);
-      })
-      .catch((err) => {
-        console.error("[InviteModal] fetch failed:", err.message);
-        setLinkError("Could not generate invite link. Try closing and reopening.");
-        setLinkLoading(false);
-      });
-  }, [token]);
-
-  useEffect(() => {
-    const id = window.setTimeout(fetchInviteLink, 0);
-    return () => window.clearTimeout(id);
-  }, [fetchInviteLink]);
-
-  const handleCopyLink = () => {
-    if (!inviteLink) return;
-    navigator.clipboard.writeText(inviteLink).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50">
-          <div>
-            <p className="text-sm font-semibold text-gray-900">Invite to {orgName}</p>
-            <p className="text-xs text-gray-500">Share the link — invited users land directly in the workspace</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 rounded-lg p-1 hover:bg-gray-100 transition-colors">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div className="px-5 py-5 flex flex-col gap-5">
-          <div>
-            <p className="text-xs font-medium text-gray-700 mb-2">Shareable invite link</p>
-            {linkLoading ? (
-              <div className="flex items-center gap-2 border border-gray-200 rounded-xl px-3 py-2.5 bg-gray-50">
-                <svg className="animate-spin flex-shrink-0" width="14" height="14" viewBox="0 0 24 24"
-                  fill="none" stroke="#6b7280" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M21 12a9 9 0 11-6.219-8.56"/>
-                </svg>
-                <span className="text-xs text-gray-400">Generating link…</span>
-              </div>
-            ) : linkError ? (
-              <div className="border border-red-200 rounded-xl px-3 py-2.5 bg-red-50">
-                <p className="text-xs text-red-500">{linkError}</p>
-                <button onClick={fetchInviteLink} className="text-xs text-red-500 underline mt-1">Retry</button>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <div className="flex-1 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 text-xs text-gray-600 truncate select-all font-mono">
-                  {inviteLink}
-                </div>
-                <button
-                  onClick={handleCopyLink}
-                  className={`px-3 py-2 rounded-xl text-xs font-medium transition-all flex-shrink-0 ${
-                    copied
-                      ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200"
-                  }`}>
-                  {copied ? "✓ Copied" : "Copy"}
-                </button>
-              </div>
-            )}
-            <p className="text-xs text-gray-400 mt-1.5">
-              Anyone with this link joins <strong>{orgName}</strong> and lands directly in the workspace.
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ManageMembersModal({ members, onlineSet, userEmail, onClose, onRemoveMember, onChangeRole }) {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [removingId, setRemovingId]   = useState(null);
-  const [updatingId, setUpdatingId]   = useState(null);
-
-  const filtered = members.filter(
-    (m) =>
-      m.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      m.role?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-emerald-50 flex-shrink-0">
-          <div>
-            <p className="text-sm font-semibold text-gray-900">Manage members</p>
-            <p className="text-xs text-gray-500">{members.length} member{members.length !== 1 ? "s" : ""} · {onlineSet.size} online</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 rounded-lg p-1 hover:bg-gray-100 transition-colors">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div className="px-5 py-3 border-b border-gray-100 flex-shrink-0">
-          <div className="relative">
-            <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
-            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search members…"
-              className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-emerald-400 transition-colors"/>
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto px-5 py-3 flex flex-col gap-2">
-          {filtered.length === 0 ? (
-            <p className="text-xs text-gray-400 text-center py-8">No members found.</p>
-          ) : (
-            filtered.map((member) => {
-              const isCurrentUser = member.email === userEmail;
-              const isOnline      = onlineSet.has(member.user_sub);
-              return (
-                <div key={member.user_sub}
-                  className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${
-                    isCurrentUser ? "border-emerald-200 bg-emerald-50" : "border-gray-100 hover:bg-gray-50"
-                  }`}>
-                  <div className="relative flex-shrink-0">
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${getAvatarColor(member.email)}`}>
-                      {getInitials(member.email)}
-                    </div>
-                    <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white ${isOnline ? "bg-emerald-400" : "bg-gray-300"}`}/>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">
-                      {member.email?.split("@")[0]}
-                      {isCurrentUser && <span className="ml-1.5 text-xs text-emerald-600 font-normal">(you)</span>}
-                    </p>
-                    <p className="text-xs text-gray-400 truncate">{member.email}</p>
-                  </div>
-                  <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${isOnline ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
-                    {isOnline ? "Online" : "Offline"}
-                  </span>
-                  {!isCurrentUser ? (
-                    <select value={member.role || "member"}
-                      onChange={(e) => {
-                        setUpdatingId(member.user_sub);
-                        onChangeRole(member, e.target.value).finally(() => setUpdatingId(null));
-                      }}
-                      disabled={updatingId === member.user_sub}
-                      className="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:border-emerald-400 text-gray-700 flex-shrink-0 disabled:opacity-50">
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                  ) : (
-                    <span className="text-xs text-gray-500 px-2 py-1 bg-gray-100 rounded-lg flex-shrink-0 capitalize">
-                      {member.role || "member"}
-                    </span>
-                  )}
-                  {!isCurrentUser && (
-                    <button
-                      onClick={() => {
-                        setRemovingId(member.user_sub);
-                        onRemoveMember(member).finally(() => setRemovingId(null));
-                      }}
-                      disabled={removingId === member.user_sub}
-                      className="flex-shrink-0 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors disabled:opacity-40">
-                      {removingId === member.user_sub ? "…" : (
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                          <polyline points="3 6 5 6 21 6"/>
-                          <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
-                          <path d="M10 11v6"/><path d="M14 11v6"/>
-                        </svg>
-                      )}
-                    </button>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-        <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex-shrink-0">
-          <p className="text-xs text-gray-400 text-center">
-            Only admins can remove members or change roles. Changes take effect immediately.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function DocViewerPage({ user, mode, orgName }) {
+export default function DocViewerPage({ user }) {
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -469,15 +188,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
     file:    stateFile = null,
   } = location.state || {};
 
-  const isOrg = mode === "org";
   const isPDF = docName.toLowerCase().endsWith(".pdf");
 
-  const CHAT_KEY    = chatKey(docName);
-  const SOURCES_KEY = sourcesKey(docName);
-
-  // ── Token / orgId bootstrap ──────────────────────────────────────────────
-  const tokenRef  = useRef(null);
-  const orgIdRef  = useRef(null);
+  // ── Token bootstrap ───────────────────────────────────────────────────────
+  const tokenRef = useRef(null);
   const [tokenReady, setTokenReady] = useState(false);
 
   useEffect(() => {
@@ -485,7 +199,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
       .then((r) => r.json())
       .then((d) => {
         tokenRef.current = d.access_token || "dev-token";
-        orgIdRef.current = d.orgId || null;
         setTokenReady(true);
       })
       .catch(() => {
@@ -494,19 +207,19 @@ export default function DocViewerPage({ user, mode, orgName }) {
       });
   }, []);
 
-  // ── Shared chat history (org mode only) ──────────────────────────────────
-  const [sharedHistoryLoaded, setSharedHistoryLoaded] = useState(!isOrg);
+  // ── Load chat history from Supabase ──────────────────────────────────────
+  const [historyLoaded, setHistoryLoaded] = useState(false);
 
   useEffect(() => {
-    if (!isOrg || !tokenReady || !docName) return;
-    getSharedChatHistory(docName, tokenRef.current, orgIdRef.current)
+    if (!tokenReady || !docName) return;
+    getChatHistory(docName, tokenRef.current)
       .then(({ messages: msgs, sources }) => {
         setMessages((msgs || []).filter((m) => !m.streaming && m.content));
         setSourcesHistory(sources || []);
-        setSharedHistoryLoaded(true);
+        setHistoryLoaded(true);
       })
-      .catch(() => setSharedHistoryLoaded(true));
-  }, [isOrg, tokenReady, docName]);
+      .catch(() => setHistoryLoaded(true));
+  }, [tokenReady, docName]);
 
   // ── PDF file resolution ──────────────────────────────────────────────────
   const [resolvedFileUrl, setResolvedFileUrl] = useState(fileUrl || null);
@@ -520,7 +233,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
       try {
         const res = await fetch(
           `${AUTH_URL}/documents/file-url?doc_name=${encodeURIComponent(docName)}`,
-          // FIX: added credentials: "include" so the session cookie is sent
           { credentials: "include" }
         );
         if (res.ok) {
@@ -542,12 +254,9 @@ export default function DocViewerPage({ user, mode, orgName }) {
     setManualFile(file);
   };
 
-  // FIX: blob URL creation moved out of useMemo into a useEffect.
-  // useMemo must be pure — calling URL.createObjectURL inside it causes
-  // a URL leak in React Strict Mode (runs twice, leaks the first one).
   useEffect(() => {
     if (isPDF || resolvedFileUrl || manualFile) return;
-    if (blobUrlRef.current) return; // already created
+    if (blobUrlRef.current) return;
     const fileObj = (stateFile instanceof File ? stateFile : null) ?? retrieveFile();
     if (fileObj) {
       blobUrlRef.current = URL.createObjectURL(fileObj);
@@ -571,57 +280,37 @@ export default function DocViewerPage({ user, mode, orgName }) {
   }, []);
 
   // ── Chat / sources state ─────────────────────────────────────────────────
-  const [messages, setMessages] = useState(() =>
-    isOrg
-      ? []
-      : loadFromStorage(chatKey(docName), []).filter((m) => !m.streaming && m.content)
-  );
-  const [sourcesHistory, setSourcesHistory] = useState(() =>
-    isOrg ? [] : loadFromStorage(sourcesKey(docName), [])
-  );
-  const [chatHistory, setChatHistory]           = useState([]);
-  const [input, setInput]                       = useState("");
-  const [loading, setLoading]                   = useState(false);
-  const [highlights, setHighlights]             = useState([]);
-  const [highlightedPages, setHighlightedPages] = useState({});
-  const [numPages, setNumPages]                 = useState(null);
-  const [fetchedText, setFetchedText]           = useState("");
-  const [selectedText, setSelectedText]         = useState("");
-  const [noteColor, setNoteColor]               = useState(ANNOTATION_COLORS[0]);
-  const [showNotePanel, setShowNotePanel]       = useState(false);
-  const [members, setMembers]                   = useState([]);
-  const [onlineSet, setOnlineSet]               = useState(new Set());
-  const [showSourcesPanel, setShowSourcesPanel] = useState(false);
-  const [showInviteModal, setShowInviteModal]   = useState(false);
-  const [showMembersModal, setShowMembersModal] = useState(false);
+  const [messages,        setMessages]        = useState([]);
+  const [sourcesHistory,  setSourcesHistory]  = useState([]);
+  const [chatHistory,     setChatHistory]     = useState([]);
+  const [input,           setInput]           = useState("");
+  const [loading,         setLoading]         = useState(false);
+  const [highlights,      setHighlights]      = useState([]);
+  const [highlightedPages,setHighlightedPages]= useState({});
+  const [numPages,        setNumPages]        = useState(null);
+  const [fetchedText,     setFetchedText]     = useState("");
+  const [selectedText,    setSelectedText]    = useState("");
+  const [noteColor,       setNoteColor]       = useState(ANNOTATION_COLORS[0]);
+  const [showNotePanel,   setShowNotePanel]   = useState(false);
+  const [showSourcesPanel,setShowSourcesPanel]= useState(false);
 
   const pageRefs  = useRef({});
   const bottomRef = useRef(null);
 
-  const userEmail      = user?.email || "dev@securestream.local";
   const sourcePassages = sourcesHistory.length > 0
     ? (sourcesHistory[sourcesHistory.length - 1].passages || [])
     : [];
 
-  // ── Persist messages ─────────────────────────────────────────────────────
+  // ── Persist messages to Supabase (debounced) ─────────────────────────────
   useEffect(() => {
     const settled = messages.filter((m) => !m.streaming && m.content);
-    if (!settled.length || !sharedHistoryLoaded) return;
+    if (!settled.length || !historyLoaded) return;
 
-    if (isOrg && tokenReady && orgIdRef.current) {
-      const t = setTimeout(() => {
-        saveSharedChatHistory(docName, settled, sourcesHistory, tokenRef.current, orgIdRef.current);
-      }, 2000);
-      return () => clearTimeout(t);
-    } else if (!isOrg) {
-      saveToStorage(CHAT_KEY, settled);
-    }
-  }, [messages, sourcesHistory, isOrg, tokenReady, sharedHistoryLoaded, docName, CHAT_KEY]);
-
-  useEffect(() => {
-    if (!sourcesHistory.length || !sharedHistoryLoaded) return;
-    if (!isOrg) saveToStorage(SOURCES_KEY, sourcesHistory);
-  }, [sourcesHistory, isOrg, sharedHistoryLoaded, SOURCES_KEY]);
+    const t = setTimeout(() => {
+      saveChatHistory(docName, settled, sourcesHistory, tokenRef.current);
+    }, 2000);
+    return () => clearTimeout(t);
+  }, [messages, sourcesHistory, historyLoaded, docName]);
 
   // ── Guard: redirect if no docName ────────────────────────────────────────
   useEffect(() => {
@@ -633,7 +322,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
     if (!docName || !tokenReady) return;
     const t = setTimeout(async () => {
       try {
-        const res = await getDocumentText(docName, tokenRef.current, orgIdRef.current);
+        const res = await getDocumentText(docName, tokenRef.current);
         setFetchedText(res.text || "");
       } catch {
         setFetchedText("");
@@ -641,31 +330,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     }, 400);
     return () => clearTimeout(t);
   }, [docName, tokenReady]);
-
-  // ── Org: members + online presence ───────────────────────────────────────
-  useEffect(() => {
-    if (!isOrg) return;
-    const fetchAll = async () => {
-      try {
-        const [mData, oData] = await Promise.all([getOrgMembers(), getOnlineMembers()]);
-        setMembers(mData.members || []);
-        setOnlineSet(new Set((oData.online || []).map((o) => o.user_sub)));
-      } catch {
-        setMembers([]);
-        setOnlineSet(new Set());
-      }
-    };
-    fetchAll();
-    const iv = setInterval(fetchAll, 30000);
-    return () => clearInterval(iv);
-  }, [isOrg]);
-
-  useEffect(() => {
-    if (!isOrg) return;
-    pingPresence();
-    const iv = setInterval(pingPresence, 60000);
-    return () => clearInterval(iv);
-  }, [isOrg]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -675,29 +339,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
     if (isPDF) return;
     const sel = window.getSelection()?.toString().trim();
     if (sel && sel.length > 3) { setSelectedText(sel); setShowNotePanel(true); }
-  };
-
-  // FIX: added credentials: "include" to both member management fetches.
-  // The backend uses requireAuth/requireAdmin which reads req.session —
-  // without the cookie, these calls silently return 401.
-  const handleRemoveMember = async (member) => {
-    await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}`, {
-      method:      "DELETE",
-      credentials: "include",
-    });
-    setMembers((prev) => prev.filter((m) => m.user_sub !== member.user_sub));
-  };
-
-  const handleChangeRole = async (member, newRole) => {
-    await fetch(`${import.meta.env.VITE_BACKEND_URL}/org/members/${member.user_sub}/role`, {
-      method:      "PATCH",
-      credentials: "include",
-      headers:     { "Content-Type": "application/json" },
-      body:        JSON.stringify({ role: newRole }),
-    });
-    setMembers((prev) =>
-      prev.map((m) => m.user_sub === member.user_sub ? { ...m, role: newRole } : m)
-    );
   };
 
   // ── Send question ────────────────────────────────────────────────────────
@@ -778,7 +419,6 @@ export default function DocViewerPage({ user, mode, orgName }) {
           setLoading(false);
         },
         3,
-        orgIdRef.current,
       );
     } catch (err) {
       setMessages((m) => {
@@ -796,50 +436,25 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
   const displayText      = docText || fetchedText;
   const parts            = highlightText(displayText, highlights);
-  const onlineCount      = onlineSet.size;
   const totalSourceCount = sourcesHistory.reduce((n, g) => n + (g.passages?.length || 0), 0);
-  const accentBtn        = isOrg ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#185FA5] hover:bg-[#0C447C]";
-  const accentFocus      = isOrg ? "focus:border-emerald-400" : "focus:border-[#185FA5]";
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 font-sans">
       <Navbar user={user} />
 
-      {showInviteModal && tokenReady && (
-        <InviteModal orgName={orgName} token={tokenRef.current} onClose={() => setShowInviteModal(false)} />
-      )}
-      {showMembersModal && (
-        <ManageMembersModal
-          members={members} onlineSet={onlineSet} userEmail={userEmail}
-          onClose={() => setShowMembersModal(false)}
-          onRemoveMember={handleRemoveMember} onChangeRole={handleChangeRole}
-        />
-      )}
-
       <main className="flex overflow-hidden" style={{ height: "calc(100vh - 57px)" }}>
 
+        {/* ── Document pane ────────────────────────────────────────────────── */}
         <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-100 bg-white min-w-0">
 
-          <div className={`flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0 ${
-            isOrg ? "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200" : "bg-white border-gray-100"
-          }`}>
+          {/* Header */}
+          <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-100 bg-white flex-shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <button onClick={() => navigate("/dashboard")}
                 className="text-xs text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0">
                 ← Dashboard
               </button>
               <span className="text-gray-200">|</span>
-              {isOrg && (
-                <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-1">
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                    <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-                    <circle cx="9" cy="7" r="4"/>
-                    <path d="M23 21v-2a4 4 0 00-3-3.87"/>
-                    <path d="M16 3.13a4 4 0 010 7.75"/>
-                  </svg>
-                  {orgName}
-                </span>
-              )}
               <span className="text-sm font-medium text-gray-700 truncate">{docName}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${isPDF ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"}`}>
                 {isPDF ? "PDF" : "TXT"}
@@ -862,51 +477,10 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   {totalSourceCount} source{totalSourceCount !== 1 ? "s" : ""}
                 </button>
               )}
-              {isOrg && members.length > 0 && (
-                <div className="flex items-center gap-2 pl-2 border-l border-emerald-200">
-                  <span className="text-xs text-emerald-600 font-medium">{onlineCount} online</span>
-                  <div className="flex -space-x-1.5">
-                    {members.slice(0, 5).map((m) => (
-                      <MemberAvatar key={m.user_sub} member={m}
-                        isOnline={onlineSet.has(m.user_sub)} isCurrent={m.email === userEmail}/>
-                    ))}
-                    {members.length > 5 && (
-                      <div className="w-7 h-7 rounded-full bg-gray-100 border-2 border-white flex items-center justify-center text-xs font-medium text-gray-500">
-                        +{members.length - 5}
-                      </div>
-                    )}
-                  </div>
-                  <button onClick={() => setShowMembersModal(true)}
-                    className="text-xs text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100 px-2 py-1 rounded-lg transition-colors border border-emerald-200 flex items-center gap-1">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-                      <circle cx="9" cy="7" r="4"/>
-                      <line x1="23" y1="11" x2="23" y2="17"/>
-                      <line x1="20" y1="14" x2="26" y2="14"/>
-                    </svg>
-                    Manage
-                  </button>
-                  <button onClick={() => setShowInviteModal(true)}
-                    className={`text-xs text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
-                      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                    </svg>
-                    Invite
-                  </button>
-                </div>
-              )}
-              {isOrg && members.length === 0 && (
-                <button onClick={() => setShowInviteModal(true)}
-                  className={`text-xs text-white px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 ${accentBtn}`}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  Invite
-                </button>
-              )}
             </div>
           </div>
 
+          {/* Document content */}
           <div
             onMouseUp={!isPDF ? handleTextSelect : undefined}
             className="flex-1 overflow-y-auto"
@@ -974,7 +548,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                         />
                         <button
                           onClick={() => fileInputRef.current?.click()}
-                          className={`px-4 py-2 text-white text-xs rounded-xl transition-colors mb-2 ${accentBtn}`}>
+                          className="px-4 py-2 text-white text-xs rounded-xl bg-[#185FA5] hover:bg-[#0C447C] transition-colors mb-2">
                           Open PDF from device
                         </button>
                         <p className="text-xs text-gray-400">
@@ -1012,6 +586,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             )}
           </div>
 
+          {/* Note panel (text selection) */}
           {showNotePanel && (
             <div className="flex-shrink-0 border-t border-gray-200 bg-white px-5 py-4">
               <div className="flex items-center justify-between mb-2">
@@ -1035,26 +610,24 @@ export default function DocViewerPage({ user, mode, orgName }) {
           )}
         </div>
 
+        {/* ── Sources history panel (slides in) ────────────────────────────── */}
         {showSourcesPanel && (
           <SourcesPanel sourcesHistory={sourcesHistory} isPDF={isPDF}
             pageRefs={pageRefs} onClose={() => setShowSourcesPanel(false)}/>
         )}
 
-        {/* ── Chat panel ────────────────────────────────────────────────────── */}
+        {/* ── Chat panel ───────────────────────────────────────────────────── */}
         <div className="w-96 flex flex-col bg-white flex-shrink-0 border-l border-gray-100">
-          <div className={`px-4 py-3 border-b flex-shrink-0 ${isOrg ? "bg-emerald-50 border-emerald-100" : "bg-white border-gray-100"}`}>
+
+          {/* Chat header */}
+          <div className="px-4 py-3 border-b border-gray-100 bg-white flex-shrink-0">
             <div className="flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-semibold text-gray-900">Ask AI</p>
                   <button
                     onClick={() => {
-                      if (isOrg && tokenReady && orgIdRef.current) {
-                        saveSharedChatHistory(docName, [], [], tokenRef.current, orgIdRef.current);
-                      } else {
-                        localStorage.removeItem(CHAT_KEY);
-                        localStorage.removeItem(SOURCES_KEY);
-                      }
+                      saveChatHistory(docName, [], [], tokenRef.current);
                       setMessages([]); setSourcesHistory([]); setChatHistory([]);
                       setHighlights([]); setHighlightedPages({});
                     }}
@@ -1066,35 +639,30 @@ export default function DocViewerPage({ user, mode, orgName }) {
                   {isPDF ? "Searches embedded content" : "Highlights relevant passages"}
                 </p>
               </div>
-              {isOrg && (
-                <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg font-medium">
-                  Shared workspace
-                </span>
-              )}
             </div>
           </div>
 
+          {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
-            {!sharedHistoryLoaded ? (
+            {!historyLoaded ? (
               <div className="flex items-center justify-center mt-10 gap-2 text-gray-400">
                 <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24"
                   fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <path d="M21 12a9 9 0 11-6.219-8.56"/>
                 </svg>
-                <span className="text-xs">Loading shared chat history…</span>
+                <span className="text-xs">Loading chat history…</span>
               </div>
             ) : messages.length === 0 ? (
               <div className="text-center mt-10">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 ${isOrg ? "bg-emerald-50" : "bg-blue-50"}`}>
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3 bg-blue-50">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                    stroke={isOrg ? "#0F6E56" : "#185FA5"} strokeWidth="2" strokeLinecap="round">
+                    stroke="#185FA5" strokeWidth="2" strokeLinecap="round">
                     <circle cx="11" cy="11" r="8"/>
                     <line x1="21" y1="21" x2="16.65" y2="16.65"/>
                   </svg>
                 </div>
                 <p className="text-xs text-gray-400 leading-relaxed px-4">
-                  {isOrg ? "Ask anything about this shared document."
-                    : "Ask anything. Matching passages are highlighted automatically."}
+                  Ask anything. Matching passages are highlighted automatically.
                 </p>
               </div>
             ) : null}
@@ -1102,7 +670,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             {messages.map((msg, i) => (
               <div key={i} className={`flex gap-2 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
                 {msg.role === "assistant" && (
-                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${isOrg ? "bg-emerald-600" : "bg-[#185FA5]"}`}>
+                  <div className="w-6 h-6 rounded-lg bg-[#185FA5] flex items-center justify-center flex-shrink-0 mt-0.5">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="white">
                       <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
                     </svg>
@@ -1111,7 +679,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
                 <div
                   className={`rounded-2xl px-3 py-2.5 text-xs leading-relaxed max-w-[82%] ${
                     msg.role === "user"
-                      ? isOrg ? "bg-emerald-600 text-white rounded-tr-sm" : "bg-[#185FA5] text-white rounded-tr-sm"
+                      ? "bg-[#185FA5] text-white rounded-tr-sm"
                       : "bg-gray-50 border border-gray-100 text-gray-800 rounded-tl-sm"
                   }`}
                   style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
@@ -1124,7 +692,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
 
             {loading && !messages[messages.length - 1]?.streaming && (
               <div className="flex gap-2">
-                <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${isOrg ? "bg-emerald-600" : "bg-[#185FA5]"}`}>
+                <div className="w-6 h-6 rounded-lg bg-[#185FA5] flex items-center justify-center flex-shrink-0">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="white">
                     <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
                   </svg>
@@ -1139,6 +707,7 @@ export default function DocViewerPage({ user, mode, orgName }) {
             <div ref={bottomRef}/>
           </div>
 
+          {/* Latest sources strip */}
           {sourcePassages.length > 0 && (
             <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-gray-50">
               <div className="flex items-center justify-between mb-2">
@@ -1181,15 +750,16 @@ export default function DocViewerPage({ user, mode, orgName }) {
             </div>
           )}
 
+          {/* Input */}
           <div className="flex-shrink-0 px-4 py-3 border-t border-gray-100">
             <div className="flex gap-2">
               <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
-                placeholder={isOrg ? "Ask about this shared document..." : "Ask about this document..."}
-                disabled={!tokenReady || (isOrg && !sharedHistoryLoaded)}
-                className={`flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none transition-colors disabled:opacity-50 ${accentFocus}`}/>
-              <button onClick={send} disabled={!input.trim() || loading || !tokenReady}
-                className={`px-3 rounded-xl text-white disabled:opacity-40 transition-colors ${accentBtn}`}>
+                placeholder="Ask about this document..."
+                disabled={!tokenReady || !historyLoaded}
+                className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-[#185FA5] transition-colors disabled:opacity-50"/>
+              <button onClick={send} disabled={!input.trim() || loading || !tokenReady || !historyLoaded}
+                className="px-3 rounded-xl text-white bg-[#185FA5] hover:bg-[#0C447C] disabled:opacity-40 transition-colors">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
                   <line x1="22" y1="2" x2="11" y2="13"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
