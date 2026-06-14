@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     await close_http()
 
 
-app = FastAPI(title="SecureStream AI Service", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="SecureStream AI Service", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +48,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
+    logger.exception("Unhandled RuntimeError on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error. Please try again."})
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -63,7 +69,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(SecurityHeadersMiddleware)
-
 
 
 @app.middleware("http")
@@ -129,7 +134,6 @@ ALLOWED_MIME = {"application/pdf", "text/plain"}
 MAX_FILE_MB  = 10
 
 
-
 @app.get("/health")
 async def health():
     db_status = await db_test()
@@ -168,17 +172,13 @@ async def query_stream(
     user_id = get_user_id(claims)
     logger.info("[SSE] question=%r user=%s doc=%r", body.question, user_id, body.doc_name)
 
-    # ------------------------------------------------------------------
-    # Layer 1: exact cache — MD5 of the question, no embedding needed.
-    # ------------------------------------------------------------------
+    # ── Layer 1: exact cache ──────────────────────────────────────────────────
     cached = await get_cached(user_id, body.question)
     if cached:
         logger.info("[SSE] exact cache HIT user=%s", user_id)
 
         async def stream_cached_exact():
             answer = cached.get("answer", "")
-            # Stream the cached answer token-by-token so the UI behaves
-            # identically whether the answer is live or cached.
             for word in answer.split(" "):
                 yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'sources': cached.get('sources', []), 'source_passages': cached.get('source_passages', [])})}\n\n"
@@ -186,14 +186,10 @@ async def query_stream(
         return StreamingResponse(stream_cached_exact(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # ------------------------------------------------------------------
-    # Retrieval — also returns the query vector produced during vector
-    # search so we can (a) check semantic cache and (b) write it back
-    # later without a second Jina round-trip.
-    # ------------------------------------------------------------------
+    # ── Retrieval ─────────────────────────────────────────────────────────────
     combined, query_vector = await retrieve(
         question=body.question,
-        org_id=user_id,
+        user_id=user_id,
         doc_name=body.doc_name or "",
         top_k=body.top_k,
     )
@@ -212,9 +208,7 @@ async def query_stream(
             return StreamingResponse(stream_cached_semantic(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # ------------------------------------------------------------------
-    # No cache hit — full pipeline.
-    # ------------------------------------------------------------------
+    # ── No cache hit — full pipeline ──────────────────────────────────────────
     if not combined:
         async def empty():
             yield f"data: {json.dumps({'token': 'No relevant content found in the document.', 'done': False})}\n\n"
@@ -278,18 +272,13 @@ async def query_stream(
             "source_passages": source_passages,
         }
 
-        # Exact cache — synchronous write in a background task.
-        asyncio.create_task(
-            set_cached(user_id, body.question, result_to_cache, ttl=300)
-        )
+        asyncio.create_task(set_cached(user_id, body.question, result_to_cache, ttl=300))
 
-        # Semantic cache — only if we have the query vector from retrieval.
         if query_vector:
             asyncio.create_task(
                 set_semantic_cache(user_id, body.question, query_vector, result_to_cache, ttl=300)
             )
 
-        # Query log.
         asyncio.create_task(
             save_query_log(user_id, body.question, full_answer_str, source_passages)
         )
@@ -305,9 +294,9 @@ async def query_stream(
 async def list_documents(claims: dict = Depends(verify_token)):
     user_id = get_user_id(claims)
     data    = await db_get("documents", {
-        "org_id": f"eq.{user_id}",
-        "select": "doc_name,created_at,metadata,file_url",
-        "order":  "created_at.desc",
+        "user_id": f"eq.{user_id}",
+        "select":  "doc_name,created_at,metadata,file_url",
+        "order":   "created_at.desc",
     })
     seen: set[str] = set()
     docs: list[dict] = []
@@ -330,7 +319,7 @@ async def list_documents(claims: dict = Depends(verify_token)):
 async def get_document_file_url(doc_name: str, claims: dict = Depends(verify_token)):
     user_id = get_user_id(claims)
     rows    = await db_get("documents", {
-        "org_id":   f"eq.{user_id}",
+        "user_id":  f"eq.{user_id}",
         "doc_name": f"eq.{doc_name}",
         "select":   "file_url,metadata",
         "limit":    "1",
@@ -353,7 +342,7 @@ async def get_document_text(
 ):
     user_id = get_user_id(claims)
     chunks  = await db_get("documents", {
-        "org_id":   f"eq.{user_id}",
+        "user_id":  f"eq.{user_id}",
         "doc_name": f"eq.{doc_name}",
         "select":   "chunk_text,metadata",
         "order":    "metadata->chunk_index.asc",
@@ -375,7 +364,7 @@ async def get_chat_history(doc_name: str, claims: dict = Depends(verify_token)):
     user_id = get_user_id(claims)
     try:
         data = await db_get("chat_history", {
-            "org_id":   f"eq.{user_id}",
+            "user_id":  f"eq.{user_id}",
             "doc_name": f"eq.{doc_name}",
             "select":   "messages,sources",
             "limit":    "1",
@@ -406,7 +395,7 @@ async def save_chat_history(
     try:
         patched = await db_patch(
             "chat_history",
-            filters={"org_id": user_id, "doc_name": body.doc_name},
+            filters={"user_id": user_id, "doc_name": body.doc_name},
             data=payload,
         )
         if patched:
@@ -416,8 +405,8 @@ async def save_chat_history(
 
     rows = await db_upsert(
         "chat_history",
-        [{"org_id": user_id, "doc_name": body.doc_name, **payload}],
-        on_conflict="org_id,doc_name",
+        [{"user_id": user_id, "doc_name": body.doc_name, **payload}],
+        on_conflict="user_id,doc_name",
     )
     if not rows:
         raise HTTPException(status_code=500, detail="Failed to save chat history")
