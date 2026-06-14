@@ -38,7 +38,6 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer:          str
     sources:         list[str]
-    org_id:          str
     source_passages: list[dict] = Field(default_factory=list)
     chat_history:    list[dict] = Field(default_factory=list)
     grounded:        bool       = True
