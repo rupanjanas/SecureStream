@@ -152,9 +152,9 @@ def _score_keyword_chunk(chunk: dict, kw_terms: list[str]) -> float:
 
 async def retrieve(
     question: str,
-    org_id: str,
+    user_id:  str,
     doc_name: str = "",
-    top_k: int = 5,
+    top_k:    int = 5,
 ) -> tuple[list[dict], Optional[list[float]]]:
     """
     Returns (chunks, query_vector).
@@ -167,7 +167,7 @@ async def retrieve(
     async def keyword_search() -> list[dict]:
         results: list[dict] = []
         batches = await asyncio.gather(
-            *[db_keyword_search(org_id, kw, doc_name=doc_name or None) for kw in kw_terms],
+            *[db_keyword_search(user_id, kw, doc_name=doc_name or None) for kw in kw_terms],
             return_exceptions=True,
         )
         for b in batches:
@@ -185,10 +185,10 @@ async def retrieve(
         try:
             query_vector = await embed_query(question)
             result = await db_rpc("match_documents", {
-                "query_embedding": query_vector,
-                "match_count": 20,
-                "filter_org_id": org_id,
-                "filter_doc_name": doc_name or "",
+                "query_embedding":  query_vector,
+                "match_count":      20,
+                "filter_user_id":   user_id,
+                "filter_doc_name":  doc_name or "",
             })
             top_sim = result[0].get("similarity", 0) if result else 0
             logger.debug("Vector → %d chunks, top sim=%.3f", len(result), top_sim)
@@ -202,30 +202,27 @@ async def retrieve(
     combined = filter_junk(combined)
     combined = rerank(question, combined)
     combined = combined[:top_k]
-    logger.info("retrieve: final=%d chunks org=%s", len(combined), org_id)
+    logger.info("retrieve: final=%d chunks user=%s", len(combined), user_id)
     return combined, query_vector
 
 
 async def save_query_log(
-    org_id: str,
-    question: str,
-    answer: str,
+    user_id:         str,
+    question:        str,
+    answer:          str,
     source_passages: list,
 ) -> None:
     try:
         await db_insert("query_logs", [{
-            "org_id": org_id,
+            "user_id":  user_id,
             "question": question,
-            "answer": answer,
-            "sources": json.dumps(source_passages),
+            "answer":   answer,
+            "sources":  json.dumps(source_passages),
         }])
     except Exception:
         logger.exception("Failed to save query log")
 
 
-# ---------------------------------------------------------------------------
-# Compat shims — keep existing call-sites working
-# ---------------------------------------------------------------------------
 
 def get_embedder():                                   return embed_query
 def filter_junk_chunks(chunks: list) -> list:        return filter_junk(chunks)
@@ -234,6 +231,6 @@ def compress_context(chunks: list, max_tokens=1500): return chunks
 def group_by_section(chunks: list) -> str:           return build_context(chunks)
 
 
-async def hybrid_retrieve(q, org, top_k=5):
-    chunks, _ = await retrieve(q, org, top_k=top_k)
+async def hybrid_retrieve(q: str, user_id: str, top_k: int = 5):
+    chunks, _ = await retrieve(q, user_id, top_k=top_k)
     return chunks
