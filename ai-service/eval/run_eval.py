@@ -10,10 +10,14 @@ from langchain_groq import ChatGroq
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from datasets import Dataset
 from test_questions import test_set
+import os
+from dotenv import load_dotenv
+
 
 BASE_URL = "http://127.0.0.1:8000"
 TOKEN = "dev-token"
-GROQ_API_KEY = "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"  # ← paste your Groq key here
+load_dotenv(dotenv_path="../.env")  # loads from ai-service/.env
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 async def get_answer(question: str) -> dict:
