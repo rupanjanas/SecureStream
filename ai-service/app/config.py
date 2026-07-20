@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 300
 
     # Groq
-    groq_model:       str   = "llama-3.1-8b-instant"
+    groq_model:       str   = "llama-3.3-70b-versatile"
     groq_temperature: float = 0.1
     groq_max_tokens:  int   = 600
 
