@@ -1,31 +1,21 @@
-# Node modules
-node_modules/
-
-# Environment variables
-/backend/.env
-/ai-service/.env
+# Environment
 .env
-**/.env
-**/.env.*
+*.env
 
-# Logs
-logs
-*.log
+# Virtual environments
+venv/
+eval/eval_venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Eval outputs
+eval/ragas_results.csv
 
 # OS files
 .DS_Store
 Thumbs.db
-
-# Build folders
-dist/
-build/
-
-# Vite cache
-.vite/
-
-# IDE files
-.vscode/
-.idea/
-
-# Optional
-coverage/
